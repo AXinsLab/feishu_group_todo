@@ -1,0 +1,71 @@
+{
+  "url_verification": {
+    "challenge": "test_challenge_token_12345",
+    "token": "test_verification_token",
+    "type": "url_verification"
+  },
+
+  "message_receive": {
+    "schema": "2.0",
+    "header": {
+      "event_id": "evt_test_msg_001",
+      "event_type": "im.message.receive_v1",
+      "create_time": "1711590000000",
+      "token": "test_verification_token",
+      "app_id": "cli_test_app"
+    },
+    "event": {
+      "sender": {
+        "sender_id": {
+          "open_id": "ou_test_user_1",
+          "union_id": "on_test_user_1"
+        },
+        "sender_type": "user"
+      },
+      "message": {
+        "message_id": "om_test_001",
+        "root_id": "om_test_001",
+        "chat_id": "oc_test_group_001",
+        "chat_type": "group",
+        "message_type": "text",
+        "create_time": "1711590000000",
+        "content": "{\"text\":\"@机器人 新增任务 修复登录bug 负责人 张三\"}",
+        "mentions": [
+          {
+            "key": "@_user_1",
+            "id": {"open_id": "ou_bot_id"},
+            "name": "任务追踪助手",
+            "tenant_key": "tenant_test"
+          }
+        ]
+      }
+    }
+  },
+
+  "bot_added": {
+    "schema": "2.0",
+    "header": {
+      "event_id": "evt_test_add_001",
+      "event_type": "im.chat.member.bot.added_v1",
+      "create_time": "1711590000000",
+      "token": "test_verification_token",
+      "app_id": "cli_test_app"
+    },
+    "event": {
+      "chat_id": "oc_test_group_002",
+      "operator_id": {
+        "open_id": "ou_test_admin_1"
+      },
+      "external": false,
+      "users": [
+        {
+          "name": "任务追踪助手",
+          "tenant_key": "tenant_test",
+          "user_id": {
+            "open_id": "ou_bot_id"
+          }
+        }
+      ]
+    }
+  }
+}
