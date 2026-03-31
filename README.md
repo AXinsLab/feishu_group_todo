@@ -1,70 +1,133 @@
-# 飞书群聊 Todo 智能体
+<div align="center">
 
-基于 LangGraph 构建的飞书群聊任务追踪机器人。自动提取群消息中的任务、管理进度，并每日发送工作报告。
+# 🤖 Feishu Group Todo Agent
 
-## 功能特性
+**An intelligent task tracking bot for Feishu group chats, powered by LangGraph & DeepSeek-V3.**
 
-- **@机器人 交互**：通过自然语言新增、修改、删除、查询、恢复任务
-- **定时分析**：每日 09:30 自动分析昨日群消息，提取新任务，更新已完成任务
-- **每日报告**：生成包含完成情况、进行中任务（含逾期标注）的结构化日报
-- **多群支持**：一个机器人管理多个群，数据相互隔离
-- **双重去重**：消息 ID 硬过滤 + LLM 语义去重，避免重复创建任务
-- **数据持久化**：任务、成员、群配置存储于飞书多维表格
+[![Python](https://img.shields.io/badge/Python-3.13+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-0.2+-FF6B35?style=flat-square)](https://langchain-ai.github.io/langgraph/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
+[![Tests](https://img.shields.io/badge/Tests-42%20passed-brightgreen?style=flat-square&logo=pytest)](tests/)
+[![uv](https://img.shields.io/badge/uv-package%20manager-purple?style=flat-square)](https://docs.astral.sh/uv/)
 
-## 技术栈
+[English](#-features) · [中文](README.zh-CN.md)
 
-| 层 | 技术 |
+</div>
+
+---
+
+## ✨ Features
+
+- 🗣️ **Natural Language Interaction** — Mention the bot to create, update, delete, query, or restore tasks using plain language
+- ⏰ **Scheduled Analysis** — Every morning at 09:30, automatically analyzes yesterday's messages, extracts new tasks, and marks completed ones
+- 📊 **Daily Reports** — Sends structured daily reports with completed tasks, in-progress items, and overdue warnings
+- 👥 **Multi-Group Support** — Manages multiple Feishu groups with fully isolated data per group
+- 🔁 **Deduplication** — Two-layer dedup: hard message-ID filter + LLM semantic comparison to prevent duplicate tasks
+- 💾 **Feishu Bitable Storage** — Tasks, members, and group configs are persisted in Feishu Bitable (spreadsheet-like database)
+- 🔄 **Resumable Workflows** — SQLite-based checkpoint support for crash recovery in scheduled tasks
+
+---
+
+## 🏗️ Architecture
+
+Three independent LangGraph workflows handle all scenarios:
+
+```
+Feishu Event
+    │
+    ├─── 🤖 Bot Added to Group  ──►  OnboardGraph
+    │                                 └─ Create Bitable tables
+    │                                 └─ Sync members
+    │                                 └─ Send introduction
+    │
+    ├─── 💬 @Bot Message        ──►  MessageGraph
+    │                                 └─ Classify intent (LLM)
+    │                                 └─ Execute CRUD operation
+    │                                 └─ Reply to user
+    │
+    └─── ⏱️ Cron Trigger        ──►  SchedulerGraph
+                                      └─ Fetch & filter messages
+                                      └─ LLM analysis
+                                      └─ Update task statuses
+                                      └─ Send daily report
+```
+
+---
+
+## 🛠️ Tech Stack
+
+| Layer | Technology |
 |---|---|
-| Web 框架 | FastAPI |
-| Agent 编排 | LangGraph |
-| LLM | AzureChatOpenAI（DeepSeek-V3） |
-| 飞书 SDK | lark-oapi |
-| 存储 | 飞书多维表格（Bitable） |
-| 断点续跑 | langgraph-checkpoint-sqlite |
-| 运行时 | Python 3.13 + uv |
+| 🌐 Web Framework | [FastAPI](https://fastapi.tiangolo.com/) |
+| 🧠 Agent Orchestration | [LangGraph](https://langchain-ai.github.io/langgraph/) |
+| 🤖 LLM | AzureChatOpenAI (DeepSeek-V3 via Azure AI Foundry) |
+| 📡 Feishu SDK | [lark-oapi](https://github.com/larksuite/oapi-sdk-python) |
+| 🗄️ Storage | Feishu Bitable (Todo, Members, Group Config tables) |
+| 💾 Checkpointing | langgraph-checkpoint-sqlite |
+| ⚡ Runtime | Python 3.13 + [uv](https://docs.astral.sh/uv/) |
 
-## 项目结构
+---
+
+## 📁 Project Structure
 
 ```
-├── main.py                  # FastAPI 入口，Webhook 路由
-├── config.py                # 配置（pydantic-settings）
-├── schemas/
-│   ├── models.py            # Pydantic 数据模型
-│   └── state.py             # LangGraph State 定义
-├── graphs/
-│   ├── onboard_graph.py     # 入群初始化 Graph
-│   ├── message_graph.py     # @机器人消息处理 Graph
-│   └── scheduler_graph.py  # 定时总结 Graph
-├── nodes/
-│   ├── feishu_nodes.py      # 飞书相关节点
-│   ├── bitable_nodes.py     # 多维表格 CRUD 节点
-│   ├── llm_nodes.py         # LLM 调用节点
-│   └── report_nodes.py      # 报告生成节点
-├── prompts/
-│   ├── intent.py            # 意图分类 Prompt
-│   ├── analyzer.py          # 消息分析 Prompt
-│   └── report.py            # 回复文本常量
-├── tools/
-│   ├── feishu_client.py     # 飞书 API 客户端
-│   ├── bitable_client.py    # 多维表格客户端
-│   ├── storage_interface.py # 存储抽象接口
-│   └── llm_client.py        # LLM 单例
-├── tests/                   # pytest 测试（42 个用例）
-├── Dockerfile
-├── docker-compose.yml
-└── .env.example
+feishu_group_todo/
+├── 📄 main.py                   # FastAPI entry point & webhook routes
+├── ⚙️  config.py                 # Settings (pydantic-settings + lru_cache)
+│
+├── 📐 schemas/
+│   ├── models.py                # Pydantic v2 data models & StrEnum types
+│   └── state.py                 # LangGraph TypedDict states (3 graphs)
+│
+├── 🔀 graphs/
+│   ├── onboard_graph.py         # Bot join initialization workflow
+│   ├── message_graph.py         # @mention message handling workflow
+│   └── scheduler_graph.py       # Scheduled summarization workflow
+│
+├── 🧩 nodes/
+│   ├── feishu_nodes.py          # Feishu API interaction nodes
+│   ├── bitable_nodes.py         # Bitable CRUD nodes
+│   ├── llm_nodes.py             # LLM inference nodes
+│   └── report_nodes.py          # Report & reply generation nodes
+│
+├── 💬 prompts/
+│   ├── intent.py                # Intent classification prompt + schema
+│   ├── analyzer.py              # Message analysis prompt + schema
+│   └── report.py                # Reply text templates
+│
+├── 🔧 tools/
+│   ├── feishu_client.py         # Feishu client (TokenManager, RateLimiter, retry)
+│   ├── bitable_client.py        # StorageInterface implementation
+│   ├── storage_interface.py     # Abstract storage interface (swappable backend)
+│   └── llm_client.py            # AzureChatOpenAI singleton
+│
+├── 🧪 tests/                    # pytest test suite (42 test cases)
+│   ├── conftest.py              # Shared fixtures (mock_storage, mock_feishu, mock_llm)
+│   ├── fixtures/                # JSON test data
+│   ├── test_feishu_client.py
+│   ├── test_bitable_client.py
+│   ├── test_onboard_graph.py
+│   ├── test_message_graph.py
+│   └── test_scheduler_graph.py
+│
+├── 🐳 Dockerfile
+├── 🐳 docker-compose.yml
+└── 📋 .env.example
 ```
 
-## 快速开始
+---
 
-### 前置要求
+## 🚀 Quick Start
+
+### Prerequisites
 
 - Python 3.13+
-- [uv](https://docs.astral.sh/uv/)
-- 飞书开放平台应用（已开通消息、群成员、多维表格权限）
-- Azure AI Foundry 部署的 DeepSeek-V3 模型
+- [uv](https://docs.astral.sh/uv/) package manager
+- A Feishu Open Platform app (with message, member, and Bitable permissions)
+- DeepSeek-V3 model deployed on Azure AI Foundry
 
-### 安装
+### Installation
 
 ```bash
 git clone https://github.com/AXinsLab/feishu_group_todo.git
@@ -72,71 +135,90 @@ cd feishu_group_todo
 uv sync
 ```
 
-### 配置
+### Configuration
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入所有配置项
+# Fill in your credentials
 ```
 
-主要配置项（详见 `.env.example`）：
+Key environment variables (see `.env.example` for full list):
 
 ```env
+# Azure AI Foundry
 AZURE_ENDPOINT=https://your-endpoint.openai.azure.com/
 AZURE_DEPLOYMENT=deepseek-v3
+AZURE_API_VERSION=2024-05-01-preview
+AZURE_API_KEY=your-api-key
+
+# Feishu App
 FEISHU_APP_ID=cli_xxxxxxxx
 FEISHU_APP_SECRET=xxxxxxxx
 FEISHU_VERIFICATION_TOKEN=xxxxxxxx
+
+# Storage
 BITABLE_APP_TOKEN=xxxxxxxx
+
+# Ops
 OPS_CHAT_ID=oc_xxxxxxxx
 WEBHOOK_SECRET=your-secret
 ```
 
-### 运行
+### Run
 
 ```bash
-# 开发模式
+# Development
 uv run uvicorn main:app --reload --port 8000
 
-# 生产（Docker）
+# Production (Docker)
 docker compose up -d
 ```
 
-### 测试
+### Test
 
 ```bash
 uv run pytest tests/ -v
 ```
 
-## 飞书应用配置
+---
 
-1. 在[飞书开放平台](https://open.feishu.cn)创建企业自建应用
-2. **事件订阅** → 请求 URL 填写 `https://your-domain/webhook/feishu`
-3. 订阅以下事件：
-   - `im.message.receive_v1`（接收消息）
-   - `im.chat.member.bot.added_v1`（机器人入群）
-4. 开通权限：消息读写、获取群成员、多维表格读写
+## ⚙️ Feishu App Setup
 
-## 定时任务
+1. Create an internal app at [open.feishu.cn](https://open.feishu.cn)
+2. **Event Subscriptions** → Set request URL to `https://your-domain/webhook/feishu`
+3. Subscribe to events:
+   - `im.message.receive_v1` — Receive messages
+   - `im.chat.member.bot.added_v1` — Bot added to group
+4. Grant permissions: read/write messages, get group members, read/write Bitable
 
-在服务器上配置 cron，每日 09:30 触发定时总结：
+---
+
+## ⏱️ Scheduled Trigger
+
+Configure a cron job on your server to trigger daily reports at 09:30:
 
 ```bash
 30 9 * * * curl -X POST https://your-domain/webhook/scheduler \
   -H "X-Webhook-Secret: your-secret"
 ```
 
-## 机器人指令示例
+---
 
-| 指令 | 说明 |
+## 💬 Bot Command Examples
+
+| Command | Action |
 |---|---|
-| `新增任务 修复登录Bug 负责人 张三 截止 2024-04-01` | 新增任务 |
-| `登录Bug已完成` | 标记任务完成 |
-| `修改登录Bug 改为负责人李四` | 修改任务 |
-| `删除登录Bug任务` | 删除任务 |
-| `查询登录Bug的状态` | 查询任务 |
-| `恢复任务 登录Bug` | 将已完成任务恢复为进行中 |
+| `Add task Fix login bug assignee Alice due 2024-04-01` | ➕ Create task |
+| `Login bug is done` | ✅ Mark as completed |
+| `Update login bug change assignee to Bob` | ✏️ Update task |
+| `Delete login bug task` | 🗑️ Delete task |
+| `Query status of login bug` | 🔍 Query task |
+| `Restore task login bug` | 🔄 Restore to in-progress |
 
-## License
+> The bot uses LLM-based intent classification, so commands can be expressed naturally in Chinese or English.
 
-MIT
+---
+
+## 📄 License
+
+MIT © [AXinsLab](https://github.com/AXinsLab)
