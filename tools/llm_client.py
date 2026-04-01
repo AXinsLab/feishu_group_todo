@@ -25,5 +25,4 @@ def get_llm() -> AzureChatOpenAI:
         azure_deployment=settings.azure_deployment,
         api_version=settings.azure_api_version,
         api_key=settings.azure_api_key.get_secret_value(),
-        temperature=0.1,
     )

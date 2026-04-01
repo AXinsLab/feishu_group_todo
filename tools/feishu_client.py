@@ -359,10 +359,10 @@ class FeishuClient:
                 "content": content,
                 "msg_type": msg_type,
             }
-            headers["receive_id_type"] = "chat_id"
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(url, headers=headers, json=payload)
+            params = {"receive_id_type": "chat_id"} if not reply_to_message_id else {}
+            resp = await client.post(url, headers=headers, json=payload, params=params)
             if resp.status_code == 429:
                 raise FeishuRateLimitError("Rate limited on send_message")
             resp.raise_for_status()
@@ -467,3 +467,106 @@ class FeishuClient:
         if data.get("code") != 0:
             raise FeishuAPIError(f"get_chat_info failed: {data.get('msg')}")
         return data.get("data", {})
+
+    @with_retry(max_retries=3)
+    async def get_bot_info(self) -> dict:
+        """获取机器人自身信息（open_id、名称等）。
+
+        Returns:
+            包含 open_id、app_name 等字段的字典。
+        """
+        await self._rate_limiter.acquire("get_bot_info")
+        headers = await self._get_headers()
+        url = "https://open.feishu.cn/open-apis/bot/v3/info"
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 429:
+                raise FeishuRateLimitError("Rate limited on get_bot_info")
+            resp.raise_for_status()
+            data = resp.json()
+
+        if data.get("code") != 0:
+            raise FeishuAPIError(f"get_bot_info failed: {data.get('msg')}")
+        return data.get("bot", {})
+    @with_retry(max_retries=3)
+    async def list_bitable_fields(
+        self,
+        app_token: str,
+        table_id: str,
+    ) -> list[dict]:
+        """查询数据表中已有的字段列表。
+
+        Args:
+            app_token: 多维表格 App Token。
+            table_id: 数据表 ID。
+
+        Returns:
+            字段定义列表，每项包含 field_name、type 等。
+        """
+        await self._rate_limiter.acquire("list_bitable_fields")
+        headers = await self._get_headers()
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1"
+            f"/apps/{app_token}/tables/{table_id}/fields"
+        )
+        fields: list[dict] = []
+        page_token: str | None = None
+
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=30.0) as client:
+            while True:
+                params: dict = {"page_size": 100}
+                if page_token:
+                    params["page_token"] = page_token
+                resp = await client.get(url, headers=headers, params=params)
+                if resp.status_code == 429:
+                    raise FeishuRateLimitError("Rate limited on list_bitable_fields")
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("code") != 0:
+                    raise FeishuAPIError(f"list_bitable_fields failed: {data.get('msg')}")
+                for item in data.get("data", {}).get("items", []):
+                    fields.append(item)
+                if not data.get("data", {}).get("has_more"):
+                    break
+                page_token = data.get("data", {}).get("page_token")
+
+        return fields
+
+    @with_retry(max_retries=3)
+    async def add_bitable_field(
+        self,
+        app_token: str,
+        table_id: str,
+        field_def: dict,
+    ) -> str:
+        """向已有数据表添加一个字段。
+
+        Args:
+            app_token: 多维表格 App Token。
+            table_id: 数据表 ID。
+            field_def: 字段定义，包含 field_name、type（以及可选 property）。
+
+        Returns:
+            新字段的 field_id。
+        """
+        await self._rate_limiter.acquire("add_bitable_field")
+        headers = await self._get_headers()
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1"
+            f"/apps/{app_token}/tables/{table_id}/fields"
+        )
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url, headers=headers, json=field_def)
+            if resp.status_code == 429:
+                raise FeishuRateLimitError("Rate limited on add_bitable_field")
+            resp.raise_for_status()
+            data = resp.json()
+        if data.get("code") != 0:
+            raise FeishuAPIError(
+                f"add_bitable_field failed: {data.get('msg')} | field={field_def.get('field_name')}"
+            )
+        return data["data"]["field"]["field_id"]
+

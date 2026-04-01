@@ -48,6 +48,14 @@ class MessageState(TypedDict):
     reply_text: str
     # 防止成员刷新死循环：最多重试 1 次
     member_refresh_attempted: bool
+    # LLM 意图分类完整结果（必须在 TypedDict 中声明，否则 LangGraph 不创建 channel 会丢弃该字段）
+    _intent_result: dict
+    # 消息中 @提及 的非 bot 用户列表，格式：[{"name": "甘鑫", "open_id": "ou_xxx"}]
+    mentioned_users: list
+    # 机器人自身 open_id，用于 parse_event 中过滤 bot 自身的 @mention
+    bot_open_id: str
+    # 检测到的系统 "/" 指令（如 "/init"），None 表示普通消息
+    system_command: str | None
 
 
 class OnboardState(TypedDict):
@@ -58,4 +66,5 @@ class OnboardState(TypedDict):
     group_name: str
     is_first_time: bool
     bitable_exists: bool
+    schema_repair_report: dict  # ensure_schema() 修复报告
     member_list: list[dict]

@@ -3,10 +3,35 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# 飞书多维表格日期字段要求 UTC 00:00:00 的毫秒时间戳
+# 注意：不使用 CST（UTC+8）本地午夜，否则会导致 DatetimeFieldConvFail
+def _date_to_ms(d: date) -> int:
+    """将 date 对象转为飞书多维表格所需的毫秒时间戳（UTC 00:00:00）。
+
+    飞书 Bitable 日期字段要求传入 UTC 午夜毫秒时间戳（可被 86400000 整除），
+    使用 CST 午夜会导致 DatetimeFieldConvFail。
+    """
+    from datetime import timezone
+    return int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _due_date_ms(s: str | None) -> int | None:
+    """将 LLM 返回的 due_date 字符串（YYYY-MM-DD）转为毫秒时间戳；空则返回 None。
+
+    返回 None 而非空串，调用方应跳过 None 值字段，
+    避免向飞书日期字段传入空字符串导致 DatetimeFieldConvFail。
+    """
+    if not s:
+        return None
+    try:
+        return _date_to_ms(date.fromisoformat(s))
+    except (ValueError, TypeError):
+        return None
 
 
 async def fetch_todos(
@@ -131,7 +156,7 @@ async def build_operations(state: dict) -> dict:
     """
     analysis: dict = state.get("llm_analysis", {})
     operations: list[dict] = []
-    today_str = str(date.today())
+    today_ms = _date_to_ms(date.today())
 
     # 高置信度完成
     for record_id in analysis.get("high_confidence_done", []):
@@ -141,7 +166,7 @@ async def build_operations(state: dict) -> dict:
                 "record_id": record_id,
                 "fields": {
                     "状态": "已完成",
-                    "完成日期": today_str,
+                    "完成日期": today_ms,
                     "完成来源": "LLM判断",
                 },
             }
@@ -161,24 +186,20 @@ async def build_operations(state: dict) -> dict:
 
     # 新增任务
     for task in analysis.get("new_tasks", []):
-        operations.append(
-            {
-                "type": "create",
-                "fields": {
-                    "任务描述": task.get("description", ""),
-                    "负责人姓名": task.get("assignee_name") or "",
-                    "负责人open_id": task.get("assignee_open_id") or "",
-                    "预期完成时间": task.get("due_date") or "",
-                    "状态": "进行中",
-                    "来源类型": "定时提取",
-                    "来源消息ID": task.get("source_message_id", ""),
-                    "来源摘要": task.get("source_summary", ""),
-                    "创建日期": today_str,
-                    "最后更新": today_str,
-                    "群ID": state.get("current_group_id", ""),
-                },
-            }
-        )
+        task_fields: dict = {
+            "任务描述": task.get("description", ""),
+            "负责人姓名": task.get("assignee_name") or "",
+            "负责人open_id": task.get("assignee_open_id") or "",
+            "状态": "进行中",
+            "来源类型": "定时提取",
+            "来源消息ID": task.get("source_message_id", ""),
+            "来源摘要": task.get("source_summary", ""),
+            "创建日期": today_ms,
+            "最后更新": today_ms,
+            "群ID": state.get("current_group_id", ""),
+        }
+        # due_date 字段已移除，不再写入预期完成时间
+        operations.append({"type": "create", "fields": task_fields})
 
     return {"update_operations": operations}
 
@@ -238,27 +259,42 @@ async def execute_operation(
     target_todo: dict | None = state.get("target_todo")
     group_id: str = state.get("group_id", "")
     message_id: str = state.get("message_id", "")
-    today_str = str(date.today())
+    today_ms = _date_to_ms(date.today())
 
     try:
         if operation_type == "新增":
             intent = state.get("_intent_result", {})
+            member_map = state.get("member_map", {})
+            assignee_name = _resolve_assignee_name(intent, member_map)
+            assignee_open_id = _resolve_assignee_open_id(intent, member_map)
+            # fallback 1：LLM 未提取到负责人时，直接使用消息中 @提及 的第一个非 bot 用户
+            if not assignee_name:
+                for _u in state.get("mentioned_users", []):
+                    assignee_name = _u.get("name", "")
+                    assignee_open_id = _u.get("open_id", "")
+                    break
+            # fallback 2：仍无负责人则默认为消息发送者
+            if not assignee_name:
+                sender_open_id = state.get("sender_open_id", "")
+                if sender_open_id:
+                    sender_info = member_map.get(sender_open_id, {})
+                    assignee_name = (
+                        sender_info.get("真实姓名")
+                        or sender_info.get("name", "")
+                    )
+                    assignee_open_id = sender_open_id
             fields = {
                 "任务描述": intent.get("task_description", ""),
-                "负责人姓名": _resolve_assignee_name(
-                    intent, state.get("member_map", {})
-                ),
-                "负责人open_id": _resolve_assignee_open_id(
-                    intent, state.get("member_map", {})
-                ),
-                "预期完成时间": intent.get("due_date") or "",
+                "负责人姓名": assignee_name,
+                "负责人open_id": assignee_open_id,
                 "状态": "进行中",
                 "来源类型": "成员手动添加",
                 "来源消息ID": message_id,
-                "创建日期": today_str,
-                "最后更新": today_str,
+                "创建日期": today_ms,
+                "最后更新": today_ms,
                 "群ID": group_id,
             }
+            # due_date 字段已移除，不再写入预期完成时间
             record_id = await storage.create_todo(fields)
             return {
                 "update_result": {
@@ -282,9 +318,9 @@ async def execute_operation(
         if operation_type == "标记完成":
             fields = {
                 "状态": "已完成",
-                "完成日期": today_str,
+                "完成日期": today_ms,
                 "完成来源": "成员确认",
-                "最后更新": today_str,
+                "最后更新": today_ms,
             }
             await storage.update_todo(record_id, fields)
             return {
@@ -297,7 +333,7 @@ async def execute_operation(
 
         if operation_type == "修改":
             intent = state.get("_intent_result", {})
-            update_fields: dict = {"最后更新": today_str}
+            update_fields: dict = {"最后更新": today_ms}
             if intent.get("new_content"):
                 update_fields["任务描述"] = intent["new_content"]
             if intent.get("assignee_name"):
@@ -306,8 +342,7 @@ async def execute_operation(
                     intent,
                     state.get("member_map", {}),
                 )
-            if intent.get("due_date"):
-                update_fields["预期完成时间"] = intent["due_date"]
+            # due_date 字段已移除
             await storage.update_todo(record_id, update_fields)
             return {
                 "update_result": {
@@ -331,8 +366,8 @@ async def execute_operation(
         if operation_type == "恢复任务":
             fields = {
                 "状态": "进行中",
-                "完成日期": "",
-                "最后更新": today_str,
+                # 注意：不清空完成日期，避免向日期字段传入空值导致 DatetimeFieldConvFail
+                "最后更新": today_ms,
             }
             await storage.update_todo(record_id, fields)
             return {
@@ -413,17 +448,50 @@ async def check_bitable_exists(
     state: dict,
     storage: Any,
 ) -> dict:
-    """检查多维表格是否已创建。
+    """检查多维表格是否已创建，并自动修复缺失的子表和字段。
+
+    若 storage 已配置 app_token（来自 token.txt 或环境变量），则：
+    1. 验证 bitable 可访问性；
+    2. 若可访问，调用 ensure_schema() 自动补全缺失子表和字段；
+    3. 不论修复结果如何，都返回 bitable_exists=True，避免覆盖用户配置的 token。
+
+    若未配置 token，则返回 bitable_exists=False，走正常创建流程。
 
     Args:
         state: OnboardState。
         storage: StorageInterface 实例。
 
     Returns:
-        包含 bitable_exists 的部分状态更新。
+        包含 bitable_exists 和 schema_repair_report 的部分状态更新。
     """
-    exists = await storage.check_bitable_exists()
-    return {"bitable_exists": exists}
+    if not storage._app_token:
+        # 无 token：走创建流程
+        return {"bitable_exists": False}
+
+    # 验证可访问性
+    accessible = await storage.check_bitable_exists()
+    if not accessible:
+        logger.warning(
+            "Bitable token %s is set but currently inaccessible "
+            "(bot may lack permission or token is invalid). "
+            "Will skip auto-creation to preserve the configured token.",
+            storage._app_token,
+        )
+        return {"bitable_exists": True, "schema_repair_report": {}}
+
+    # 可访问：自动修复缺失子表和字段
+    logger.info("Bitable accessible, running schema repair check...")
+    try:
+        report = await storage.ensure_schema()
+        any_fixed = any(actions for actions in report.values())
+        if any_fixed:
+            logger.info("Schema repair completed: %s", report)
+        else:
+            logger.info("Schema check passed, no repairs needed.")
+        return {"bitable_exists": True, "schema_repair_report": report}
+    except Exception as exc:
+        logger.error("ensure_schema failed: %s", exc)
+        return {"bitable_exists": True, "schema_repair_report": {"error": str(exc)}}
 
 
 async def create_bitable(
@@ -452,6 +520,18 @@ async def create_bitable(
             app_token,
             state.get("group_id"),
         )
+        # 将 app_token 写入 data/ 挂载目录，跨容器重建持久化
+        import os as _os
+        _token_path = _os.path.join("data", "bitable_token.txt")
+        try:
+            _os.makedirs("data", exist_ok=True)
+            with open(_token_path, "w", encoding="utf-8") as _f:
+                _f.write(app_token)
+            from config import get_settings
+            get_settings().bitable_app_token = app_token
+            logger.info("Saved BITABLE_APP_TOKEN=%s to %s", app_token, _token_path)
+        except Exception as _exc:
+            logger.warning("Failed to save BITABLE_APP_TOKEN to data/: %s", _exc)
         return {"bitable_exists": True}
     except Exception as exc:
         logger.error("create_bitable failed: %s", exc)
@@ -471,12 +551,13 @@ async def write_group_config(
     Returns:
         空字典（无状态更新）。
     """
-    now = datetime.now(tz=timezone.utc).isoformat()
+    now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
     group_data = {
         "群ID": state.get("group_id", ""),
         "群名称": state.get("group_name", ""),
-        "机器人加入时间": now,
-        "最后同步时间": now,
+        "机器人加入时间": now_ms,
+        "最后同步时间": now_ms,
+        "多维表格ID": storage._app_token,
     }
     try:
         await storage.upsert_group(group_data)
@@ -514,13 +595,16 @@ async def fetch_and_write_members(
 
 
 def _resolve_assignee_name(intent: dict, member_map: dict) -> str:
-    """从意图结果和成员表中解析负责人姓名。"""
+    """从意图结果和成员表中解析负责人姓名。
+
+    先精确匹配，再子串模糊匹配（支持"甘鑫"匹配"甘鑫 Grant"等）。
+    """
     assignee_name = intent.get("assignee_name", "") or ""
     if not assignee_name:
         return ""
 
-    # 模糊匹配（不区分大小写）
     name_lower = assignee_name.lower()
+    # 第一轮：精确匹配
     for member in member_map.values():
         if isinstance(member, dict):
             candidates = [
@@ -531,16 +615,34 @@ def _resolve_assignee_name(intent: dict, member_map: dict) -> str:
             if any(c.lower() == name_lower for c in candidates if c):
                 return member.get("name", assignee_name)
 
+    # 第二轮：子串模糊匹配
+    for member in member_map.values():
+        if isinstance(member, dict):
+            candidates = [
+                member.get("name", ""),
+                member.get("en_name", ""),
+                member.get("nickname", ""),
+            ]
+            if any(
+                (name_lower in c.lower() or c.lower() in name_lower)
+                for c in candidates if c
+            ):
+                return member.get("name", assignee_name)
+
     return assignee_name
 
 
 def _resolve_assignee_open_id(intent: dict, member_map: dict) -> str:
-    """从意图结果和成员表中解析负责人 open_id。"""
+    """从意图结果和成员表中解析负责人 open_id。
+
+    先精确匹配，再子串模糊匹配（与 _resolve_assignee_name 逻辑对称）。
+    """
     assignee_name = intent.get("assignee_name", "") or ""
     if not assignee_name:
         return ""
 
     name_lower = assignee_name.lower()
+    # 第一轮：精确匹配
     for open_id, member in member_map.items():
         if isinstance(member, dict):
             candidates = [
@@ -549,6 +651,20 @@ def _resolve_assignee_open_id(intent: dict, member_map: dict) -> str:
                 member.get("nickname", ""),
             ]
             if any(c.lower() == name_lower for c in candidates if c):
+                return open_id
+
+    # 第二轮：子串模糊匹配
+    for open_id, member in member_map.items():
+        if isinstance(member, dict):
+            candidates = [
+                member.get("name", ""),
+                member.get("en_name", ""),
+                member.get("nickname", ""),
+            ]
+            if any(
+                (name_lower in c.lower() or c.lower() in name_lower)
+                for c in candidates if c
+            ):
                 return open_id
 
     return ""

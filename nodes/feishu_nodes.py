@@ -187,9 +187,20 @@ async def send_report(
     reply_text: str = state.get("reply_text", "")
 
     try:
-        await feishu.send_message(group_id, reply_text, msg_type="interactive")
-        now = datetime.now(tz=timezone.utc).isoformat()
-        await storage.upsert_group({"群ID": group_id, "最后同步时间": now})
+        # reply_text 由 generate_report 生成，格式为 JSON 字符串：
+        # {"msg_type": "text", "content": "{\"text\": \"...\"}"}
+        # 需要解包取出 content，并使用正确的 msg_type
+        import json as _json
+        try:
+            card = _json.loads(reply_text)
+            msg_type = card.get("msg_type", "text")
+            content = card.get("content", reply_text)
+        except (_json.JSONDecodeError, TypeError):
+            msg_type = "text"
+            content = _json.dumps({"text": reply_text}, ensure_ascii=False)
+        await feishu.send_message(group_id, content, msg_type=msg_type)
+        now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+        await storage.upsert_group({"群ID": group_id, "最后同步时间": now_ms})
     except Exception as exc:
         logger.error(
             "send_report failed for %s: %s",
@@ -205,15 +216,23 @@ async def send_report(
 async def parse_event(state: dict) -> dict:
     """解析飞书 im.message.receive_v1 事件，提取基本信息。
 
+    @mention 处理逻辑：
+    - bot 自身的 mention key 从文本中删除
+    - 其他用户的 mention key 替换为 @{真实姓名}（供 LLM 识别负责人）
+    - 非 bot mention 用户存入 mentioned_users，供 execute_operation 直接使用
+
     Args:
-        state: 包含 event_raw 的 MessageState。
+        state: 包含 event_raw、bot_open_id 的 MessageState。
 
     Returns:
-        包含 group_id、sender_open_id、message_id、
-        message_text 的部分状态更新。
+        包含 group_id、sender_open_id、message_id、message_text、
+        mentioned_users 的部分状态更新。
     """
+    import re
+
     event = state.get("event_raw", {})
     message = event.get("event", {}).get("message", {})
+    bot_open_id: str = state.get("bot_open_id", "")
 
     group_id = message.get("chat_id", "")
     message_id = message.get("message_id", "")
@@ -224,24 +243,58 @@ async def parse_event(state: dict) -> dict:
         .get("open_id", "")
     )
 
-    # 解析消息文本，去除 @机器人 前缀
+    # 解析消息正文
     body_content = message.get("content", "{}")
     try:
-        content = json.loads(body_content)
-        raw_text = content.get("text", "")
+        content_obj = json.loads(body_content)
+        raw_text = content_obj.get("text", "")
+        # mentions 在 content JSON 内部（飞书新格式），也可能在 message 层级
+        inline_mentions = content_obj.get("mentions", [])
     except (json.JSONDecodeError, TypeError):
         raw_text = body_content
+        inline_mentions = []
 
-    # 去除 @机器人 标记（飞书格式：<at user_id="...">...</at>）
-    import re
+    # 合并两处 mentions（兼容不同飞书消息格式）
+    msg_mentions = message.get("mentions", [])
+    all_mentions = inline_mentions if inline_mentions else msg_mentions
 
-    message_text = re.sub(r"@\S+\s*", "", raw_text).strip()
+    # 处理 @mention：bot mention 删除，用户 mention 替换为 @姓名
+    processed_text = raw_text
+    mentioned_users: list[dict] = []
+
+    for mention in all_mentions:
+        key = mention.get("key", "")
+        name = mention.get("name", "")
+        open_id = mention.get("id", {}).get("open_id", "")
+
+        if not key:
+            continue
+
+        if bot_open_id and open_id == bot_open_id:
+            # 删除 bot 自身的 @mention
+            processed_text = processed_text.replace(key, "")
+        else:
+            # 将占位符替换为真实姓名，保留 @ 前缀供 LLM 识别
+            processed_text = processed_text.replace(key, f"@{name}" if name else "")
+            if open_id or name:
+                mentioned_users.append({"name": name, "open_id": open_id})
+
+    # 清理多余空白
+    message_text = re.sub(r"\s+", " ", processed_text).strip()
+
+    # 系统指令检测：消息以 "/" 开头时提取指令名（如 "/init"）
+    system_command: str | None = None
+    if message_text.startswith("/"):
+        system_command = message_text.split()[0].lower()
 
     return {
         "group_id": group_id,
         "sender_open_id": sender_open_id,
         "message_id": message_id,
         "message_text": message_text,
+        "mentioned_users": mentioned_users,
+        "system_command": system_command,
+        "_intent_result": {},
         "member_refresh_attempted": False,
         "target_todo": None,
         "update_result": None,

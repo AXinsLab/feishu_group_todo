@@ -29,10 +29,6 @@ ANALYZER_SYSTEM = """\
    c. LLM 上下文推断
    d. 兜底：归属发言者，进展备注标注"负责人待确认"
 
-4. 时间解析：
-   - 识别消息中明确提及的截止日期
-   - 无明确日期时 due_date 填 null
-
 现有进行中任务列表（用于去重和完成状态更新）：
 {active_todos}
 
@@ -66,10 +62,6 @@ class NewTaskItem(BaseModel):
         default=None, description="负责人 open_id"
     )
     assignee_name: str | None = Field(default=None, description="负责人姓名")
-    due_date: str | None = Field(
-        default=None,
-        description="截止日期，格式 YYYY-MM-DD，不明确时为 null",
-    )
     source_message_id: str = Field(description="来源消息 ID（message_id）")
     source_summary: str = Field(
         description="原始消息片段（用于溯源，不超过100字）"

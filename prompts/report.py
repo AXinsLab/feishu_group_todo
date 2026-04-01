@@ -21,7 +21,7 @@ REJECTION_TEXT = (
 EMPTY_REPORT_TEXT = "昨日无新增任务，当前无待跟踪项目 ✅"
 
 # ── 确认话术模板 ─────────────────────────────────────────
-CONFIRM_CREATE = "✅ 已新增任务：{desc}，负责人：{assignee}，预期：{due}"
+CONFIRM_CREATE = "✅ 已新增任务：{desc}，负责人：{assignee}"
 CONFIRM_DONE = "✅ 已将「{desc}」标记为完成"
 CONFIRM_UPDATE = "✅ 已更新「{desc}」：{change}"
 CONFIRM_DELETE = "✅ 已删除「{desc}」"

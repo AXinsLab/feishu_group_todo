@@ -174,6 +174,13 @@ class BitableClient(StorageInterface):
             data = resp.json()
 
         if data.get("code") != 0:
+            # 记录详细信息便于诊断（日期字段类型转换失败等）
+            logger.error(
+                "create_record failed: code=%s msg=%s | fields=%s",
+                data.get("code"),
+                data.get("msg"),
+                {k: v for k, v in fields.items()},
+            )
             raise RuntimeError(f"create_record failed: {data.get('msg')}")
         return data["data"]["record"]["record_id"]
 
@@ -414,3 +421,145 @@ class BitableClient(StorageInterface):
             )
             self._table_id_cache[name] = table_id
             logger.info("Created table '%s': %s", name, table_id)
+    # ── Schema 自动修复 ───────────────────────────────────
+
+    # 三张必需数据表的完整字段规格（field_name → 字段定义）
+    _REQUIRED_SCHEMA: dict[str, list[dict]] = {
+        TODO_TABLE: [
+            {"field_name": "任务描述",    "type": FIELD_TYPE_TEXT},
+            {"field_name": "负责人姓名",  "type": FIELD_TYPE_TEXT},
+            {"field_name": "负责人open_id","type": FIELD_TYPE_TEXT},
+            {"field_name": "预期完成时间","type": FIELD_TYPE_DATE},
+            {
+                "field_name": "状态",
+                "type": FIELD_TYPE_SINGLE_SELECT,
+                "property": {"options": [{"name": "进行中"}, {"name": "已完成"}]},
+            },
+            {"field_name": "完成日期",   "type": FIELD_TYPE_DATE},
+            {
+                "field_name": "完成来源",
+                "type": FIELD_TYPE_SINGLE_SELECT,
+                "property": {"options": [{"name": "LLM判断"}, {"name": "成员确认"}]},
+            },
+            {
+                "field_name": "来源类型",
+                "type": FIELD_TYPE_SINGLE_SELECT,
+                "property": {"options": [{"name": "定时提取"}, {"name": "成员手动添加"}]},
+            },
+            {"field_name": "来源消息ID", "type": FIELD_TYPE_TEXT},
+            {"field_name": "进展备注",   "type": FIELD_TYPE_TEXT},
+            {"field_name": "来源摘要",   "type": FIELD_TYPE_TEXT},
+            {"field_name": "创建日期",   "type": FIELD_TYPE_DATE},
+            {"field_name": "最后更新",   "type": FIELD_TYPE_DATETIME},
+            {"field_name": "群ID",       "type": FIELD_TYPE_TEXT},
+        ],
+        MEMBER_TABLE: [
+            {"field_name": "群ID",    "type": FIELD_TYPE_TEXT},
+            {"field_name": "open_id", "type": FIELD_TYPE_TEXT},
+            {"field_name": "真实姓名","type": FIELD_TYPE_TEXT},
+            {"field_name": "姓",      "type": FIELD_TYPE_TEXT},
+            {"field_name": "名",      "type": FIELD_TYPE_TEXT},
+            {"field_name": "英文名",  "type": FIELD_TYPE_TEXT},
+            {"field_name": "群昵称",  "type": FIELD_TYPE_TEXT},
+        ],
+        GROUP_TABLE: [
+            {"field_name": "群ID",        "type": FIELD_TYPE_TEXT},
+            {"field_name": "群名称",       "type": FIELD_TYPE_TEXT},
+            {"field_name": "机器人加入时间","type": FIELD_TYPE_DATETIME},
+            {"field_name": "最后同步时间", "type": FIELD_TYPE_DATETIME},
+            {"field_name": "多维表格ID",   "type": FIELD_TYPE_TEXT},
+            {"field_name": "错误日志",     "type": FIELD_TYPE_TEXT},
+        ],
+    }
+
+    async def ensure_schema(self) -> dict[str, list[str]]:
+        """检查并自动修复多维表格的子表和字段结构。
+
+        对每张必需子表：
+        - 若子表不存在 → 创建子表（含所有字段）
+        - 若子表存在但字段缺失 → 逐一补充缺失字段
+
+        Returns:
+            修复报告字典，key 为表名，value 为已修复动作列表（空列表表示无需修复）。
+        """
+        if not self._app_token:
+            logger.warning("ensure_schema: no app_token configured, skip")
+            return {}
+
+        report: dict[str, list[str]] = {}
+
+        # 1. 获取当前所有子表
+        headers = await self._get_headers()
+        url = f"{_bitable_base_url(self._app_token)}/tables"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+        existing_tables: dict[str, str] = {}  # name → table_id
+        for t in data.get("data", {}).get("items", []):
+            existing_tables[t["name"]] = t["table_id"]
+        # 同步缓存
+        self._table_id_cache.update(existing_tables)
+
+        for table_name, required_fields in self._REQUIRED_SCHEMA.items():
+            actions: list[str] = []
+
+            if table_name not in existing_tables:
+                # ── 整张子表缺失：直接创建 ───────────────────
+                logger.info("ensure_schema: creating missing table '%s'", table_name)
+                try:
+                    table_id = await self._feishu.create_bitable_table(
+                        self._app_token, table_name, required_fields
+                    )
+                    self._table_id_cache[table_name] = table_id
+                    actions.append(f"created table '{table_name}'")
+                except Exception as exc:
+                    logger.error(
+                        "ensure_schema: failed to create table '%s': %s",
+                        table_name, exc,
+                    )
+                    actions.append(f"ERROR creating table '{table_name}': {exc}")
+            else:
+                # ── 子表已存在：检查并补充缺失字段 ──────────
+                table_id = existing_tables[table_name]
+                try:
+                    existing_fields_raw = await self._feishu.list_bitable_fields(
+                        self._app_token, table_id
+                    )
+                    existing_names = {
+                        f.get("field_name", "") for f in existing_fields_raw
+                    }
+                    for fdef in required_fields:
+                        fname = fdef["field_name"]
+                        if fname not in existing_names:
+                            logger.info(
+                                "ensure_schema: adding missing field '%s' to '%s'",
+                                fname, table_name,
+                            )
+                            try:
+                                await self._feishu.add_bitable_field(
+                                    self._app_token, table_id, fdef
+                                )
+                                actions.append(f"added field '{fname}'")
+                            except Exception as exc:
+                                logger.error(
+                                    "ensure_schema: failed to add field '%s' to '%s': %s",
+                                    fname, table_name, exc,
+                                )
+                                actions.append(f"ERROR adding field '{fname}': {exc}")
+                except Exception as exc:
+                    logger.error(
+                        "ensure_schema: failed to list fields for '%s': %s",
+                        table_name, exc,
+                    )
+                    actions.append(f"ERROR listing fields: {exc}")
+
+            report[table_name] = actions
+            if actions:
+                logger.info("ensure_schema [%s]: %s", table_name, actions)
+            else:
+                logger.debug("ensure_schema [%s]: OK (no changes needed)", table_name)
+
+        return report
+

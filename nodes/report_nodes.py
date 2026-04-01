@@ -92,12 +92,13 @@ async def build_confirm_reply(state: dict) -> dict:
 
     if operation_type == "新增":
         fields: dict = result.get("fields", {})
-        assignee = fields.get("负责人姓名") or "待定"
+        assignee_name = fields.get("负责人姓名") or ""
+        assignee_open_id = fields.get("负责人open_id") or ""
+        assignee = _format_assignee(assignee_name, assignee_open_id) if assignee_name else "待定"
         due = fields.get("预期完成时间") or "待确认"
         text = CONFIRM_CREATE.format(
             desc=fields.get("任务描述", ""),
             assignee=assignee,
-            due=due,
         )
     elif operation_type == "标记完成":
         text = CONFIRM_DONE.format(desc=desc)
@@ -112,10 +113,13 @@ async def build_confirm_reply(state: dict) -> dict:
     elif operation_type == "恢复任务":
         text = CONFIRM_RESTORE.format(desc=desc)
     elif operation_type == "查询状态":
+        assignee_name = result.get("assignee", "")
+        assignee_open_id = result.get("assignee_open_id", "")
+        assignee_display = _format_assignee(assignee_name, assignee_open_id) if assignee_name else "未分配"
         text = CONFIRM_QUERY.format(
             desc=desc,
             status=result.get("status", ""),
-            assignee=result.get("assignee", "未分配"),
+            assignee=assignee_display,
         )
     else:
         text = "✅ 操作完成"
@@ -124,6 +128,26 @@ async def build_confirm_reply(state: dict) -> dict:
 
 
 # ── 消息卡片构建辅助函数 ──────────────────────────────────
+
+
+def _format_assignee(name: str, open_id: str | None = None) -> str:
+    """根据是否有 open_id 生成飞书 @mention 或纯文本格式。
+
+    飞书文本消息支持 <at user_id="open_id">name</at> 语法渲染为真实 @mention。
+    无 open_id 时退化为 @name 纯文本。
+
+    Args:
+        name: 负责人姓名。
+        open_id: 负责人飞书 open_id（可选）。
+
+    Returns:
+        格式化后的负责人字符串。
+    """
+    if not name:
+        return ""
+    if open_id:
+        return f'<at user_id="{open_id}">{name}</at>'
+    return f"@{name}"
 
 
 def _build_report_card(
@@ -164,35 +188,22 @@ def _build_report_card(
     lines.append(f"✅ 昨日完成（{len(completed)} 项）")
     for todo in completed:
         assignee = todo.get("负责人姓名", "")
+        assignee_open_id = todo.get("负责人open_id", "")
         desc = todo.get("任务描述", "")
-        assignee_str = f" · @{assignee}" if assignee else ""
+        assignee_str = f" · {_format_assignee(assignee, assignee_open_id)}" if assignee else ""
         lines.append(f"~~· {desc}{assignee_str}~~")
 
     lines.append("")
 
-    # 待完成
+    # 待完成（带编号，编号基于全局 active 索引，供 /delete 使用）
     lines.append(f"📌 待完成（{len(normal_active)} 项）")
-    for todo in normal_active:
-        desc = todo.get("任务描述", "")
-        assignee = todo.get("负责人姓名", "")
-        due_str = todo.get("预期完成时间", "")
-        overdue_flag = ""
-
-        if due_str:
-            try:
-                due_date = date.fromisoformat(str(due_str))
-                if due_date < today:
-                    overdue_flag = " ⚠️ 已逾期"
-                due_display = due_date.strftime("%m/%d")
-            except (ValueError, TypeError):
-                due_display = "待确认"
-        else:
-            due_display = "待确认"
-
-        assignee_str = f" · @{assignee}" if assignee else ""
-        lines.append(
-            f"· {desc}{assignee_str} · 预期：{due_display}{overdue_flag}"
-        )
+    for idx, todo in enumerate(active, start=1):
+        if todo in normal_active:
+            desc = todo.get("任务描述", "")
+            assignee = todo.get("负责人姓名", "")
+            assignee_open_id = todo.get("负责人open_id", "")
+            assignee_str = f" · {_format_assignee(assignee, assignee_open_id)}" if assignee else ""
+            lines.append(f"{idx}. {desc}{assignee_str}")
 
     # 进展待确认
     if low_conf_todos:

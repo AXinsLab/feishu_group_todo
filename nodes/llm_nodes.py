@@ -93,6 +93,12 @@ async def classify_intent(state: dict) -> dict:
 
     message_text: str = state.get("message_text", "")
     all_todos: list[dict] = state.get("all_todos", [])
+    member_map: dict = state.get("member_map", {})
+
+    # 构建群成员姓名列表，供 LLM 识别自然语言中的负责人
+    member_list_str = "、".join(
+        m.get("name", "") for m in member_map.values() if m.get("name")
+    ) or "（暂无成员信息）"
 
     # 仅传递描述和状态，减少 token 消耗
     todos_summary = [
@@ -114,6 +120,7 @@ async def classify_intent(state: dict) -> dict:
                     ensure_ascii=False,
                     indent=2,
                 ),
+                "member_list": member_list_str,
             }
         )
 

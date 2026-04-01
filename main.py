@@ -12,10 +12,26 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
+import base64
+import hashlib
+import json as _json
+from Crypto.Cipher import AES
+
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
+
+
+def _decrypt_feishu(encrypt_key: str, encrypted: str) -> dict:
+    """解密飞书加密 Webhook 消息体（AES-CBC + SHA256 key）。"""
+    key = hashlib.sha256(encrypt_key.encode()).digest()
+    buf = base64.b64decode(encrypted)
+    iv, ciphertext = buf[:16], buf[16:]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    decrypted = cipher.decrypt(ciphertext)
+    decrypted = decrypted[: -decrypted[-1]]  # remove PKCS7 padding
+    return _json.loads(decrypted)
 
 # 已处理事件 ID 缓存（防飞书重试重复处理）
 # 格式：{event_id: 过期时间戳}
@@ -64,7 +80,30 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
 
     settings = get_settings()
     feishu_client = FeishuClient(settings)
+
+    # 优先从 data/bitable_token.txt 加载 token（跨容器重建持久化）
+    import os as _os
+    _token_path = _os.path.join("data", "bitable_token.txt")
+    if _os.path.exists(_token_path):
+        try:
+            with open(_token_path, "r", encoding="utf-8") as _f:
+                _saved_token = _f.read().strip()
+            if _saved_token:
+                settings.bitable_app_token = _saved_token
+                logger.info("Loaded BITABLE_APP_TOKEN=%s from %s", _saved_token, _token_path)
+        except Exception as _exc:
+            logger.warning("Failed to load BITABLE_APP_TOKEN from data/: %s", _exc)
+
     bitable_client = BitableClient(settings, feishu_client)
+
+    # 获取机器人自身 open_id（用于 @mention 过滤）
+    try:
+        _bot_info = await feishu_client.get_bot_info()
+        app.state.bot_open_id = _bot_info.get("open_id", "")
+        logger.info("Bot open_id: %s", app.state.bot_open_id)
+    except Exception as _exc:
+        logger.warning("Failed to get bot info: %s", _exc)
+        app.state.bot_open_id = ""
 
     app.state.settings = settings
     app.state.feishu_client = feishu_client
@@ -111,6 +150,13 @@ async def feishu_webhook(request: Request) -> JSONResponse:
     """
     body: dict[str, Any] = await request.json()
 
+    # 飞书加密消息解密
+    if "encrypt" in body:
+        from config import get_settings
+        encrypt_key = get_settings().feishu_encrypt_key
+        if encrypt_key:
+            body = _decrypt_feishu(encrypt_key, body["encrypt"])
+
     # URL 验证握手（飞书配置 Webhook 时发起）
     if body.get("type") == "url_verification":
         return JSONResponse({"challenge": body.get("challenge", "")})
@@ -124,6 +170,17 @@ async def feishu_webhook(request: Request) -> JSONResponse:
     event_type: str = body.get("header", {}).get("event_type", "")
 
     if event_type == "im.message.receive_v1":
+        # 只响应 @机器人 的消息，忽略普通群聊消息
+        _mentions = body.get("event", {}).get("message", {}).get("mentions", [])
+        _bot_open_id = getattr(request.app.state, "bot_open_id", "")
+        if _bot_open_id:
+            _mentioned = any(
+                m.get("id", {}).get("open_id") == _bot_open_id
+                for m in _mentions
+            )
+            if not _mentioned:
+                logger.debug("Message ignored: bot not @mentioned")
+                return JSONResponse({"code": 0})
         asyncio.create_task(_run_message_graph(request.app.state, body))
     elif event_type == "im.chat.member.bot.added_v1":
         asyncio.create_task(_run_onboard_graph(request.app.state, body))
@@ -167,7 +224,7 @@ async def scheduler_webhook(
 async def _run_message_graph(state: Any, event: dict) -> None:
     """后台执行消息响应 Graph。"""
     try:
-        await state.message_graph.ainvoke({"event_raw": event})
+        await state.message_graph.ainvoke({"event_raw": event, "bot_open_id": getattr(state, "bot_open_id", "")})
     except Exception:
         logger.exception("MessageGraph failed for event: %s", event)
 
