@@ -23,76 +23,27 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# ── 帮助卡片生成 ──────────────────────────────────────────
+# ── 帮助文本生成 ──────────────────────────────────────────
 
 
-def _build_help_card(prefix: str = "") -> str:
-    """生成帮助指令 Interactive Card，从 COMMAND_REGISTRY 动态构建。
+def _build_help_text(prefix: str = "") -> str:
+    """生成帮助指令纯文本，从 COMMAND_REGISTRY 动态构建。
 
-    双列布局：左列命令（粗体代码），右列说明，原生对齐。
     prefix 不为空时在列表上方显示提示文字（如"未知指令"）。
     """
-    from nodes.report_nodes import _card_json
-
-    elements: list[dict] = []
-
+    lines: list[str] = []
     if prefix:
-        elements.append(
-            {"tag": "div", "text": {"tag": "lark_md", "content": prefix}}
-        )
-        elements.append({"tag": "hr"})
+        lines.append(prefix)
+        lines.append("")
 
-    # 双列布局：命令 | 说明
-    cmd_elements = [
-        {"tag": "div", "text": {"tag": "lark_md", "content": f"**{cmd}**"}}
-        for cmd in COMMAND_REGISTRY
-    ]
-    desc_elements = [
-        {"tag": "div", "text": {"tag": "lark_md", "content": meta["description"]}}
-        for meta in COMMAND_REGISTRY.values()
-    ]
-    elements.append(
-        {
-            "tag": "column_set",
-            "flex_mode": "none",
-            "background_style": "default",
-            "columns": [
-                {
-                    "tag": "column",
-                    "width": "auto",
-                    "vertical_align": "top",
-                    "elements": cmd_elements,
-                },
-                {
-                    "tag": "column",
-                    "width": "weighted",
-                    "weight": 1,
-                    "vertical_align": "top",
-                    "elements": desc_elements,
-                },
-            ],
-        }
-    )
+    lines.append("🤖 可用指令列表")
+    lines.append("")
+    for cmd, meta in COMMAND_REGISTRY.items():
+        lines.append(f"{cmd}  · {meta['description']}")
 
-    elements.append({"tag": "hr"})
-    elements.append(
-        {
-            "tag": "note",
-            "elements": [
-                {"tag": "plain_text", "content": "使用方式：@机器人 /指令名"}
-            ],
-        }
-    )
-
-    card = {
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "title": {"tag": "plain_text", "content": "🤖 可用指令列表"},
-            "template": "blue",
-        },
-        "elements": elements,
-    }
-    return _card_json(card)
+    lines.append("")
+    lines.append("使用方式：@机器人 /指令名")
+    return "\n".join(lines)
 
 
 # ── 各指令 Handler ────────────────────────────────────────
@@ -100,7 +51,7 @@ def _build_help_card(prefix: str = "") -> str:
 
 async def handle_help(state: dict, feishu: Any, storage: Any) -> str:
     """显示所有可用指令列表。"""
-    return _build_help_card()
+    return _build_help_text()
 
 
 async def handle_init(state: dict, feishu: Any, storage: Any) -> str:
@@ -129,26 +80,17 @@ async def handle_init(state: dict, feishu: Any, storage: Any) -> str:
 
 
 async def handle_tasks(state: dict, feishu: Any, storage: Any) -> str:
-    """立即发送当前任务状态报告（同定时报告格式，含任务编号）。"""
-    from nodes.report_nodes import _build_report_card, _card_json
+    """立即发送当前任务状态报告（含任务编号）。"""
+    from nodes.report_nodes import _build_tasks_text
 
     group_id: str = state.get("group_id", "")
-
     active_todos = await storage.get_todos(group_id, status="进行中")
 
     if not active_todos:
         return "📋 当前没有进行中的任务。\n\n如需新增任务，请 @我 并说明操作。"
 
     from datetime import date as _date
-    today = _date.today()
-    card_dict = _build_report_card(
-        report_date=today,
-        completed=[],
-        active=active_todos,
-        low_confidence_ids=set(),
-        today=today,
-    )
-    return _card_json(card_dict)
+    return _build_tasks_text(active=active_todos, today=_date.today())
 
 
 async def handle_my(state: dict, feishu: Any, storage: Any) -> str:
@@ -192,8 +134,6 @@ async def handle_update(state: dict, feishu: Any, storage: Any) -> str:
         refresh_members,
     )
     from nodes.llm_nodes import analyze_messages
-    from nodes.report_nodes import _build_report_card, _card_json
-
     group_id: str = state.get("group_id", "")
 
     # 时间窗口：当前时间往前 24h
@@ -279,17 +219,24 @@ async def handle_update(state: dict, feishu: Any, storage: Any) -> str:
         new_count = len(analysis.get("new_tasks", []))
         done_count = len(done_ids)
 
-        # 9. 生成并返回更新后的任务卡片（由 send_reply 作为对 /update 的回复发送）
+        # 9. 生成并返回更新后的任务列表文本
         from datetime import date as _date
+        from nodes.report_nodes import _build_tasks_text
+
         today = _date.today()
-        card_dict = _build_report_card(
-            report_date=today,
-            completed=[],
+        header_parts = []
+        if new_count:
+            header_parts.append(f"已新增 {new_count} 项")
+        if done_count:
+            header_parts.append(f"标记完成 {done_count} 项")
+        header = "✅ " + "，".join(header_parts) if header_parts else "📊 任务表已同步"
+
+        return _build_tasks_text(
             active=updated_active,
-            low_confidence_ids=set(analysis.get("low_confidence_done", [])),
             today=today,
+            header=header,
+            low_confidence_ids=set(analysis.get("low_confidence_done", [])),
         )
-        return _card_json(card_dict)
 
     except Exception as exc:
         logger.error("handle_update failed for group %s: %s", group_id, exc, exc_info=True)
@@ -299,9 +246,9 @@ async def handle_update(state: dict, feishu: Any, storage: Any) -> str:
 
 
 async def handle_about_you(state: dict, feishu: Any, storage: Any) -> str:
-    """发送机器人自我介绍卡片（同入群时一致）。"""
-    from nodes.report_nodes import _build_intro_card, _card_json
-    return _card_json(_build_intro_card())
+    """发送机器人自我介绍（同入群时一致）。"""
+    from nodes.report_nodes import _build_intro_text
+    return _build_intro_text()
 
 
 def _parse_delete_indices(args_str: str, total: int) -> list[int] | str:
@@ -499,7 +446,7 @@ async def run_command(
     """
     entry = COMMAND_REGISTRY.get(cmd)
     if entry is None:
-        return _build_help_card(prefix=f"❓ 未知指令 `{cmd}`")
+        return _build_help_text(prefix=f"❓ 未知指令 `{cmd}`")
 
     try:
         result = await entry["handler"](state, feishu, storage)

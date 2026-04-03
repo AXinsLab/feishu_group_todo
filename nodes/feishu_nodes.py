@@ -387,13 +387,12 @@ async def send_introduction(
     Returns:
         空字典（无状态更新）。
     """
-    from nodes.report_nodes import _build_intro_card
+    from nodes.report_nodes import _build_intro_text
 
     group_id: str = state.get("group_id", "")
-    card = _build_intro_card()
-    content = json.dumps(card, ensure_ascii=False)
+    content = json.dumps({"text": _build_intro_text()}, ensure_ascii=False)
     try:
-        await feishu.send_message(group_id, content, msg_type="interactive")
+        await feishu.send_message(group_id, content, msg_type="text")
         logger.info("Introduction sent to group %s", group_id)
     except Exception as exc:
         logger.error(
