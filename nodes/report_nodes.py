@@ -15,17 +15,17 @@ logger = logging.getLogger(__name__)
 
 
 async def generate_report(state: dict) -> dict:
-    """构建每日任务追踪报告消息卡片 JSON。
+    """构建每日任务追踪报告文本消息。
 
-    包含：昨日完成（含删除线）、待完成、进展待确认。
-    逾期判断：预期完成时间 < 今天 AND 状态=进行中。
+    使用 msg_type=text + <at user_id="..."> 格式，支持跨租户（外部成员）@mention。
+    包含：昨日完成、待完成（带编号）、进展待确认，逾期标注。
 
     Args:
         state: 包含 completed_yesterday、active_todos、
                llm_analysis、time_window_start 的 SchedulerState。
 
     Returns:
-        包含 reply_text（卡片 JSON 字符串）的部分状态更新。
+        包含 reply_text（纯文本字符串）的部分状态更新。
     """
     completed: list[dict] = state.get("completed_yesterday", [])
     active: list[dict] = state.get("active_todos", [])
@@ -39,14 +39,15 @@ async def generate_report(state: dict) -> dict:
 
     low_confidence_ids: set[str] = set(analysis.get("low_confidence_done", []))
 
-    card_dict = _build_report_card(
-        report_date=report_date,
-        completed=completed,
-        active=active,
-        low_confidence_ids=low_confidence_ids,
-        today=today,
-    )
-    return {"reply_text": _card_json(card_dict)}
+    return {
+        "reply_text": _build_report_text(
+            report_date=report_date,
+            completed=completed,
+            active=active,
+            low_confidence_ids=low_confidence_ids,
+            today=today,
+        )
+    }
 
 
 async def build_reject_reply(state: dict) -> dict:
@@ -326,3 +327,70 @@ def _build_report_card(
         },
         "elements": elements,
     }
+
+
+def _build_report_text(
+    report_date: date,
+    completed: list[dict],
+    active: list[dict],
+    low_confidence_ids: set[str],
+    today: date,
+) -> str:
+    """构建纯文本格式的每日任务报告。
+
+    使用 <at user_id="..."> 语法支持跨租户 @mention（含外部群成员）。
+    """
+    date_str = report_date.strftime("%Y/%m/%d")
+    low_conf_todos = [t for t in active if t.get("record_id") in low_confidence_ids]
+    normal_active = [t for t in active if t.get("record_id") not in low_confidence_ids]
+
+    lines: list[str] = [f"📋 任务日报 · {date_str}", ""]
+
+    # ── 昨日完成 ────────────────────────────────────────────
+    lines.append(f"✅ 昨日完成（{len(completed)} 项）")
+    if completed:
+        for todo in completed:
+            desc = todo.get("任务描述", "")
+            name = todo.get("负责人姓名", "")
+            oid = todo.get("负责人open_id", "")
+            assignee_str = f"  {_format_assignee(name, oid)}" if name else ""
+            lines.append(f"· {desc}{assignee_str}")
+    else:
+        lines.append("· 暂无")
+
+    lines.append("")
+
+    # ── 进行中（带编号） ─────────────────────────────────────
+    lines.append(f"📌 进行中（{len(normal_active)} 项）")
+    if normal_active:
+        for idx, todo in enumerate(active, start=1):
+            if todo not in normal_active:
+                continue
+            desc = todo.get("任务描述", "")
+            name = todo.get("负责人姓名", "")
+            oid = todo.get("负责人open_id", "")
+            due = todo.get("预期完成时间", "")
+            overdue_str = ""
+            if due:
+                try:
+                    if date.fromisoformat(str(due)) < today:
+                        overdue_str = "  ⚠️逾期"
+                except (ValueError, TypeError):
+                    pass
+            assignee_str = f"  {_format_assignee(name, oid)}" if name else ""
+            lines.append(f"{idx}. {desc}{assignee_str}{overdue_str}")
+    else:
+        lines.append("· 暂无待处理任务 🎉")
+
+    # ── 进展待确认 ────────────────────────────────────────────
+    if low_conf_todos:
+        lines.append("")
+        lines.append(f"⚠️ 进展待确认（{len(low_conf_todos)} 项）")
+        for todo in low_conf_todos:
+            desc = todo.get("任务描述", "")
+            lines.append(f"· {desc}（昨日消息提及，请确认状态）")
+
+    lines.append("")
+    lines.append("/tasks 查看实时状态 · @我 可更新任务")
+
+    return "\n".join(lines)
