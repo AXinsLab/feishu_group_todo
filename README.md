@@ -2,7 +2,7 @@
 
 # 🤖 Feishu Group Todo Agent
 
-**An intelligent task tracking bot for Feishu group chats, powered by LangGraph + Azure AI (DeepSeek-V3).**
+**An intelligent task tracking bot for Feishu (Lark) group chats, powered by LangGraph + DeepSeek-V3.**
 
 [![Python](https://img.shields.io/badge/Python-3.13+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -10,24 +10,27 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 [![uv](https://img.shields.io/badge/uv-package%20manager-purple?style=flat-square)](https://docs.astral.sh/uv/)
 
+[English](README.md) · [中文](README.zh-CN.md)
+
 </div>
 
 ---
 
 ## ✨ Features
 
-- 🗣️ **Natural Language Interaction** — Mention the bot to create, update, delete, query, or restore tasks using plain language (Chinese or English)
-- 📝 **Multi-Task in One Message** — Handle multiple tasks in a single reply: "第3点不能共用，第四点有手板" marks both tasks complete with progress notes recorded
-- 🔢 **Number & Semantic Reference** — Reference tasks by index ("第3点"、"第三个") or by implicit description ("刚才那个MIC评估") — the bot resolves both
-- 📌 **Progress Notes** — When marking tasks complete, any result or explanation is automatically saved to the 进展备注 field in Bitable
-- ⏰ **Scheduled Daily Analysis** — Every morning at 09:30, automatically analyzes the past 24 hours of messages, extracts new tasks, and marks completed ones
-- 📊 **Numbered Task Reports** — Daily reports with indexed tasks (1. 2. 3. …), completed items, and per-user @mention for assignees
-- 👥 **Auto Member Sync** — Group member list is refreshed every day at 09:30 and on every `/init` or `/update` call
-- 🔁 **Two-Layer Deduplication** — Hard message-ID filter + LLM semantic comparison to prevent duplicate tasks
-- 💾 **Feishu Bitable Storage** — Tasks, members, and group configs are persisted in Feishu Bitable
-- 🔄 **Schema Auto-Repair** — On startup or `/init`, automatically creates missing Bitable sub-tables and fills in missing fields
-- 🤖 **Slash Command System** — Extensible slash command registry; new commands can be added by registering one entry — no graph changes required
+- 🗣️ **Natural Language Interaction** — Mention the bot to create, update, delete, query, or restore tasks using plain language
+- 📝 **Multi-Task in One Message** — Operate on multiple tasks in a single reply; each operation executes independently and partial failures are reported clearly
+- 🔢 **Number & Semantic Reference** — Reference tasks by index ("item 3", "the 4th one") or by implicit description ("that MIC evaluation") — the bot resolves both
+- 📌 **Progress Notes** — When marking tasks complete, any attached explanation is automatically saved to the progress note field
+- ⏰ **Scheduled Daily Analysis** — Every morning at 09:30, automatically analyzes the past 24 hours of group messages, extracts new tasks, and marks completed ones
+- 📊 **Numbered Task Reports** — Daily reports with indexed tasks, completed items with strikethrough, and per-assignee @mention
+- 👥 **Multi-Group Support** — One bot instance manages multiple groups; all data is fully isolated per group
+- 🔁 **Two-Layer Deduplication** — Hard message-ID filter + LLM semantic comparison to prevent duplicate task creation
+- 💾 **Feishu Bitable Storage** — Tasks, members, and group configs are persisted in Feishu Bitable (no extra database needed)
+- 🔄 **Schema Auto-Repair** — On bot join or `/init`, missing Bitable tables and fields are created automatically
+- 🤖 **Slash Command System** — Extensible command registry; add a new command by registering one entry — no graph changes required
 - 🔐 **AES-CBC Webhook Encryption** — Supports Feishu encrypted webhook payloads out of the box
+- ♻️ **Crash Recovery** — SQLite checkpointer lets the scheduler resume from the last checkpoint after a failure
 
 ---
 
@@ -35,20 +38,20 @@
 
 ### Natural Language Task Management (@ the bot)
 
-| Example | Action |
+| Example message | Action |
 |---|---|
-| `让甘鑫明天到会议室开会` | ➕ Create task, assignee: 甘鑫 |
-| `登录Bug张三修完了` | ✅ Mark task as completed |
-| `把登录Bug的负责人改成李四` | ✏️ Update task |
-| `删掉登录Bug这个任务` | 🗑️ Delete task |
-| `登录Bug现在什么状态` | 🔍 Query task status |
-| `把登录Bug重新激活` | 🔄 Restore to in-progress |
-| `第3点不能共用，会新增模具费` | ✅ Mark task #3 complete + save note |
-| `第四点有个实心手板，第2个完成了` | ✅ Mark tasks #4 and #2 complete in one message |
+| `Ask Alice to prepare the meeting notes by Friday` | ➕ Create task, assignee: Alice |
+| `Bob finished the login bug fix` | ✅ Mark task as completed |
+| `Change the assignee for login bug to Carol` | ✏️ Update task |
+| `Remove the login bug task` | 🗑️ Delete task |
+| `What is the status of the login bug?` | 🔍 Query task status |
+| `Reopen the login bug task` | 🔄 Restore to in-progress |
+| `Item 3: can't share parts, will add tooling cost` | ✅ Mark task #3 complete + save progress note |
+| `Item 4 has a solid mockup; item 2 is done` | ✅ Mark tasks #4 and #2 complete in one message |
 
 > When no assignee is specified, the **message sender** is automatically set as the assignee.
 >
-> You can reference tasks by their **numbered index** (第3点, 第四个) or by **natural language description** — the bot resolves both automatically.
+> You can reference tasks by their **numbered index** (item 3, the 4th one) or by **natural language description** — the bot resolves both using the active task list.
 
 ### Slash Commands (@ the bot)
 
@@ -78,19 +81,41 @@ Feishu Event
     │
     ├─── 💬 @Bot Message        ──►  MessageGraph
     │                                 ├─ [/command] → Slash command handler (no LLM)
-    │                                 └─ [natural lang] → LLM intent classify → CRUD → reply
+    │                                 └─ [natural lang] → classify intent (LLM)
+    │                                       ├─ build pending_operations list
+    │                                       ├─ execute each op independently
+    │                                       └─ reply with per-op results
     │
     └─── ⏱️ Cron Trigger        ──►  SchedulerGraph
                                       ├─ Refresh members
-                                      ├─ Fetch & deduplicate messages
-                                      ├─ LLM analysis (new tasks + completed detection)
+                                      ├─ Fetch & deduplicate messages (filter bot msgs)
+                                      ├─ LLM analysis (new tasks + completion detection)
+                                      ├─ Resolve assignee names → open_id
                                       ├─ Write to Bitable
-                                      └─ Send daily report to group
+                                      └─ Send daily report card
 ```
 
-### Slash Command Architecture
+### MessageGraph Flow Detail
 
-Commands are registered in a single `COMMAND_REGISTRY` dict in `nodes/command_nodes.py`. To add a new command:
+```
+parse_event
+    │
+    ├─ /command ──► execute_command ──► send_reply
+    │
+    └─ natural lang
+          │
+          ├─ fetch_all_todos
+          ├─ fetch_members          (pre-load before LLM so assignee names resolve)
+          ├─ classify_intent (LLM)  (builds pending_operations list)
+          │     ├─ UNRELATED ──► build_reject_reply ──► send_reply
+          │     └─ task op   ──► resolve_operation
+          │                         └─ execute_operation  (loop over pending_operations)
+          │                               └─ build_confirm_reply ──► send_reply
+```
+
+### Slash Command Extension
+
+Commands are registered in `COMMAND_REGISTRY` in `nodes/command_nodes.py`. To add a new command:
 
 ```python
 COMMAND_REGISTRY["/mycommand"] = {
@@ -99,7 +124,7 @@ COMMAND_REGISTRY["/mycommand"] = {
 }
 ```
 
-No changes to the graph are required. All handlers share a unified error-catch wrapper that sends failure messages back to the group.
+No graph changes required. All handlers share a unified error-catch wrapper.
 
 ---
 
@@ -107,13 +132,14 @@ No changes to the graph are required. All handlers share a unified error-catch w
 
 | Layer | Technology |
 |---|---|
-| 🌐 Web Framework | [FastAPI](https://fastapi.tiangolo.com/) |
-| 🧠 Agent Orchestration | [LangGraph](https://langchain-ai.github.io/langgraph/) |
-| 🤖 LLM | AzureChatOpenAI (DeepSeek-V3 via Azure AI Foundry) |
-| 🗄️ Storage | Feishu Bitable (3 tables: Todo, Members, Group Config) |
-| 💾 Checkpointing | langgraph-checkpoint-sqlite |
-| ⚡ Runtime | Python 3.13 + [uv](https://docs.astral.sh/uv/) |
-| 🔐 Webhook Security | AES-CBC decryption + HMAC secret verification |
+| Web Framework | [FastAPI](https://fastapi.tiangolo.com/) |
+| Agent Orchestration | [LangGraph](https://langchain-ai.github.io/langgraph/) |
+| LLM | AzureChatOpenAI (DeepSeek-V3 via Azure AI Foundry) |
+| Feishu SDK | [lark-oapi](https://github.com/larksuite/oapi-sdk-python) |
+| Storage | Feishu Bitable (3 tables: Todo, Members, Group Config) |
+| Checkpointing | langgraph-checkpoint-sqlite |
+| Runtime | Python 3.13 + [uv](https://docs.astral.sh/uv/) |
+| Webhook Security | AES-CBC decryption + HMAC secret verification |
 
 ---
 
@@ -122,7 +148,7 @@ No changes to the graph are required. All handlers share a unified error-catch w
 ```
 feishu_group_todo/
 ├── main.py                      # FastAPI entry point, webhook routes, AES decryption
-├── config.py                    # Settings (pydantic-settings)
+├── config.py                    # Settings (pydantic-settings + lru_cache)
 │
 ├── schemas/
 │   ├── models.py                # OperationType enum, Pydantic models
@@ -136,12 +162,12 @@ feishu_group_todo/
 ├── nodes/
 │   ├── command_nodes.py         # Slash command registry + all handlers
 │   ├── feishu_nodes.py          # Feishu API interaction nodes
-│   ├── bitable_nodes.py         # Bitable CRUD nodes
-│   ├── llm_nodes.py             # LLM inference nodes
-│   └── report_nodes.py          # Report & reply text generation
+│   ├── bitable_nodes.py         # Bitable CRUD + multi-op execution loop
+│   ├── llm_nodes.py             # LLM inference + intent → pending_operations
+│   └── report_nodes.py          # Report card builder + reply text generation
 │
 ├── prompts/
-│   ├── intent.py                # Intent classification prompt + Pydantic schema
+│   ├── intent.py                # Intent classification prompt + OperationItem schema
 │   ├── analyzer.py              # Scheduler message analysis prompt + schema
 │   └── report.py                # Reply text templates
 │
@@ -150,6 +176,11 @@ feishu_group_todo/
 │   ├── bitable_client.py        # StorageInterface implementation + ensure_schema()
 │   ├── storage_interface.py     # Abstract storage interface
 │   └── llm_client.py            # AzureChatOpenAI singleton
+│
+├── tests/                       # pytest test suite
+│   ├── conftest.py              # Shared fixtures (mock_storage, mock_feishu, mock_llm)
+│   ├── fixtures/                # JSON test data
+│   └── test_*.py
 │
 ├── Dockerfile
 ├── docker-compose.yml
@@ -163,8 +194,8 @@ feishu_group_todo/
 ### Prerequisites
 
 - Python 3.13+ with [uv](https://docs.astral.sh/uv/)
-- A Feishu Open Platform app (permissions listed below)
-- DeepSeek-V3 (or compatible) model via Azure AI Foundry
+- A Feishu Open Platform internal app (permissions listed below)
+- DeepSeek-V3 (or compatible) model deployed on Azure AI Foundry
 
 ### Installation
 
@@ -209,7 +240,7 @@ WEBHOOK_SECRET=your-secret           # Used to authenticate /webhook/scheduler c
 uv run uvicorn main:app --reload --port 8000
 
 # Production (Docker)
-docker compose up -d
+docker compose up -d --build
 ```
 
 ### Bitable Token
@@ -249,6 +280,22 @@ chmod +x /usr/local/bin/feishu_scheduler_trigger.sh
 
 # Add to crontab
 echo "30 9 * * * /usr/local/bin/feishu_scheduler_trigger.sh >> /var/log/feishu_scheduler.log 2>&1" | crontab -
+```
+
+---
+
+## 🧪 Testing
+
+```bash
+# Run all tests
+uv run pytest tests/ -v
+
+# Run a single test file
+uv run pytest tests/test_message_graph.py -v
+
+# Lint and format
+uv run ruff check .
+uv run ruff format .
 ```
 
 ---

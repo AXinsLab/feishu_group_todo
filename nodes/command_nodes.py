@@ -6,11 +6,12 @@
 - 各 handle_* 函数：每条指令的具体实现，返回回复文本字符串。
 
 支持的指令：
-  /help   · 显示所有可用指令
-  /init   · 重载成员 + 修复表格结构
-  /tasks  · 查看当前全部任务状态报告
-  /my     · 查看发送者本人的待完成任务
-  /update · 分析近 24h 消息，更新任务表
+  /help       · 显示所有可用指令
+  /init       · 重载成员 + 修复表格结构
+  /tasks      · 查看当前全部任务状态报告
+  /my         · 查看发送者本人的待完成任务
+  /update     · 分析近 24h 消息，更新任务表
+  /about_you  · 发送机器人自我介绍
 """
 
 from __future__ import annotations
@@ -22,20 +23,76 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# ── 帮助文本生成 ───────────────────────────────────────────
+# ── 帮助卡片生成 ──────────────────────────────────────────
 
 
-def _help_text(prefix: str = "") -> str:
-    """生成帮助文本，从 COMMAND_REGISTRY 动态构建。"""
-    lines = ["🤖 可用指令列表", "─────────────────────────────────"]
-    for cmd, meta in COMMAND_REGISTRY.items():
-        lines.append(f"{cmd:<10}· {meta['description']}")
-    lines.append("─────────────────────────────────")
-    lines.append("使用方式：@机器人 /指令名")
-    text = "\n".join(lines)
+def _build_help_card(prefix: str = "") -> str:
+    """生成帮助指令 Interactive Card，从 COMMAND_REGISTRY 动态构建。
+
+    双列布局：左列命令（粗体代码），右列说明，原生对齐。
+    prefix 不为空时在列表上方显示提示文字（如"未知指令"）。
+    """
+    from nodes.report_nodes import _card_json
+
+    elements: list[dict] = []
+
     if prefix:
-        text = prefix + "\n\n" + text
-    return text
+        elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": prefix}}
+        )
+        elements.append({"tag": "hr"})
+
+    # 双列布局：命令 | 说明
+    cmd_elements = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": f"**{cmd}**"}}
+        for cmd in COMMAND_REGISTRY
+    ]
+    desc_elements = [
+        {"tag": "div", "text": {"tag": "lark_md", "content": meta["description"]}}
+        for meta in COMMAND_REGISTRY.values()
+    ]
+    elements.append(
+        {
+            "tag": "column_set",
+            "flex_mode": "none",
+            "background_style": "default",
+            "columns": [
+                {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "top",
+                    "elements": cmd_elements,
+                },
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "top",
+                    "elements": desc_elements,
+                },
+            ],
+        }
+    )
+
+    elements.append({"tag": "hr"})
+    elements.append(
+        {
+            "tag": "note",
+            "elements": [
+                {"tag": "plain_text", "content": "使用方式：@机器人 /指令名"}
+            ],
+        }
+    )
+
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "🤖 可用指令列表"},
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+    return _card_json(card)
 
 
 # ── 各指令 Handler ────────────────────────────────────────
@@ -43,7 +100,7 @@ def _help_text(prefix: str = "") -> str:
 
 async def handle_help(state: dict, feishu: Any, storage: Any) -> str:
     """显示所有可用指令列表。"""
-    return _help_text()
+    return _build_help_card()
 
 
 async def handle_init(state: dict, feishu: Any, storage: Any) -> str:
@@ -73,11 +130,10 @@ async def handle_init(state: dict, feishu: Any, storage: Any) -> str:
 
 async def handle_tasks(state: dict, feishu: Any, storage: Any) -> str:
     """立即发送当前任务状态报告（同定时报告格式，含任务编号）。"""
-    from nodes.report_nodes import _build_report_card
+    from nodes.report_nodes import _build_report_card, _card_json
 
     group_id: str = state.get("group_id", "")
 
-    # 查询进行中任务（active）
     active_todos = await storage.get_todos(group_id, status="进行中")
 
     if not active_todos:
@@ -85,15 +141,14 @@ async def handle_tasks(state: dict, feishu: Any, storage: Any) -> str:
 
     from datetime import date as _date
     today = _date.today()
-    card = _build_report_card(
+    card_dict = _build_report_card(
         report_date=today,
         completed=[],
         active=active_todos,
         low_confidence_ids=set(),
         today=today,
     )
-    import json as _json
-    return _json.loads(card["content"])["text"]
+    return _card_json(card_dict)
 
 
 async def handle_my(state: dict, feishu: Any, storage: Any) -> str:
@@ -135,10 +190,9 @@ async def handle_update(state: dict, feishu: Any, storage: Any) -> str:
     from nodes.feishu_nodes import (
         fetch_messages,
         refresh_members,
-        send_report,
     )
     from nodes.llm_nodes import analyze_messages
-    from nodes.report_nodes import generate_report
+    from nodes.report_nodes import _build_report_card, _card_json
 
     group_id: str = state.get("group_id", "")
 
@@ -159,6 +213,7 @@ async def handle_update(state: dict, feishu: Any, storage: Any) -> str:
         "llm_analysis": {},
         "update_operations": [],
         "errors": [],
+        "bot_open_id": state.get("bot_open_id", ""),
     }
 
     try:
@@ -205,23 +260,36 @@ async def handle_update(state: dict, feishu: Any, storage: Any) -> str:
         result = await execute_updates(group_state, storage)
         group_state.update(result)
 
-        # 8. 生成报告文本
-        result = await generate_report(group_state)
-        group_state.update(result)
-
-        # 9. 发送报告到群（主动发送，不引用原消息）
-        await send_report(group_state, feishu, storage)
-
+        # 8. 用 in-memory 方式构建更新后的任务列表（避免 Bitable API 最终一致性问题）
         analysis = group_state.get("llm_analysis", {})
+        done_ids = set(analysis.get("high_confidence_done", []))
+        old_active = group_state.get("active_todos", [])
+
+        # 移除已完成任务
+        updated_active = [t for t in old_active if t.get("record_id") not in done_ids]
+        # 追加本次新增的任务
+        for task in analysis.get("new_tasks", []):
+            updated_active.append({
+                "任务描述": task.get("description", ""),
+                "负责人姓名": task.get("assignee_name") or "",
+                "负责人open_id": task.get("assignee_open_id") or "",
+                "状态": "进行中",
+            })
+
         new_count = len(analysis.get("new_tasks", []))
-        done_count = len(analysis.get("high_confidence_done", []))
-        return (
-            f"✅ 更新完成\n"
-            f"• 分析消息：{len(filtered)} 条\n"
-            f"• 新增任务：{new_count} 项\n"
-            f"• 标记完成：{done_count} 项\n"
-            f"详细报告已发送到群内。"
+        done_count = len(done_ids)
+
+        # 9. 生成并返回更新后的任务卡片（由 send_reply 作为对 /update 的回复发送）
+        from datetime import date as _date
+        today = _date.today()
+        card_dict = _build_report_card(
+            report_date=today,
+            completed=[],
+            active=updated_active,
+            low_confidence_ids=set(analysis.get("low_confidence_done", [])),
+            today=today,
         )
+        return _card_json(card_dict)
 
     except Exception as exc:
         logger.error("handle_update failed for group %s: %s", group_id, exc, exc_info=True)
@@ -230,49 +298,145 @@ async def handle_update(state: dict, feishu: Any, storage: Any) -> str:
 
 
 
-async def handle_delete(state: dict, feishu: Any, storage: Any) -> str:
-    """按编号删除指定任务，支持批量删除。
+async def handle_about_you(state: dict, feishu: Any, storage: Any) -> str:
+    """发送机器人自我介绍卡片（同入群时一致）。"""
+    from nodes.report_nodes import _build_intro_card, _card_json
+    return _card_json(_build_intro_card())
 
-    格式：/delete 1  或  /delete 1 2 3
-    编号与 /tasks、每日报告中的编号一致（进行中任务按写入顺序排列）。
+
+def _parse_delete_indices(args_str: str, total: int) -> list[int] | str:
+    """将 /delete 参数解析为有序的 1-based 编号列表。
+
+    支持格式（可混合使用）：
+    - 空格分隔整数：  1 2 3
+    - 括号切片：      [:]  [:4]  [2:]  [2:5]   （含首尾，1-based）
+    - 括号列表/范围：  [1,3,5]  [1-3,5,8]
+
+    返回 list[int] 或错误提示字符串。
+    """
+    _USAGE = (
+        "用法示例：\n"
+        "  /delete 1 2 3      · 删除第 1、2、3 项\n"
+        "  /delete [1-3,5]    · 删除第 1~3 和第 5 项\n"
+        "  /delete [:4]       · 删除前 4 项\n"
+        "  /delete [2:]       · 从第 2 项删到末尾\n"
+        "  /delete [:]        · 删除全部任务\n"
+        "发送 /tasks 查看任务编号。"
+    )
+
+    args_str = args_str.strip()
+    if not args_str:
+        return f"❌ 请指定要删除的任务编号。\n{_USAGE}"
+
+    indices: set[int] = set()
+
+    if args_str.startswith("[") and args_str.endswith("]"):
+        inner = args_str[1:-1].strip()
+
+        if ":" in inner:
+            # 切片语法：[start:end]，含首尾，1-based
+            halves = inner.split(":", 1)
+            start_s, end_s = halves[0].strip(), halves[1].strip()
+            try:
+                start = int(start_s) if start_s else 1
+                end = int(end_s) if end_s else total
+            except ValueError:
+                return f"❌ 切片参数格式错误：{args_str}\n正确格式示例：[:4]、[2:]、[2:5]、[:]"
+            if start < 1:
+                return f"❌ 起始编号不能小于 1（当前：{start}）"
+            if end > total:
+                return f"❌ 结束编号 {end} 超出范围（共 {total} 项）"
+            if start > end:
+                return f"❌ 起始编号 {start} 不能大于结束编号 {end}"
+            indices = set(range(start, end + 1))
+
+        else:
+            # 列表/范围语法：逗号分隔，支持 m-n 连续范围
+            for item in inner.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                if "-" in item:
+                    parts = item.split("-", 1)
+                    try:
+                        lo, hi = int(parts[0].strip()), int(parts[1].strip())
+                    except (ValueError, IndexError):
+                        return f"❌ 无效范围：{item}，正确格式如 1-3"
+                    if lo < 1 or hi < 1:
+                        return f"❌ 编号不能小于 1（当前：{item}）"
+                    if lo > hi:
+                        return f"❌ 范围起始 {lo} 不能大于结束 {hi}"
+                    if hi > total:
+                        return f"❌ 编号 {hi} 超出范围（共 {total} 项）"
+                    indices.update(range(lo, hi + 1))
+                else:
+                    try:
+                        n = int(item)
+                    except ValueError:
+                        return f"❌ 无效参数：{item}，编号必须为正整数"
+                    if n < 1:
+                        return f"❌ 编号不能小于 1（当前：{n}）"
+                    if n > total:
+                        return f"❌ 编号 {n} 超出范围（共 {total} 项）"
+                    indices.add(n)
+    else:
+        # 兼容原有空格分隔格式
+        for part in args_str.split():
+            if not part.isdigit() or int(part) < 1:
+                return f"❌ 无效参数：{part}，编号必须为正整数\n{_USAGE}"
+            n = int(part)
+            if n > total:
+                return f"❌ 编号 {n} 超出范围（共 {total} 项）"
+            indices.add(n)
+
+    if not indices:
+        return f"❌ 未解析到有效编号，请检查参数格式。\n{_USAGE}"
+
+    return sorted(indices)
+
+
+async def handle_delete(state: dict, feishu: Any, storage: Any) -> str:
+    """按编号删除指定任务，支持多种参数格式。
+
+    格式：
+      /delete 1 2 3       空格分隔编号
+      /delete [1-3,5,8]   括号内连续范围或离散编号
+      /delete [:4]        前 4 项（切片语法）
+      /delete [2:]        从第 2 项到末尾
+      /delete [:]         全部删除
+    编号与 /tasks、每日报告中的编号一致。
     """
     group_id: str = state.get("group_id", "")
     message_text: str = state.get("message_text", "")
 
-    # 解析编号参数
-    parts = message_text.strip().split()[1:]  # 跳过 "/delete"
-    if not parts:
+    # 取 "/delete" 之后的全部内容（保留括号内空格）
+    args_str = message_text.strip()[len("/delete"):].strip()
+
+    active_todos = await storage.get_todos(group_id, status="进行中")
+    if not active_todos and not args_str:
+        return "📭 当前没有进行中的任务。"
+
+    # 无参数时先提示用法（不依赖 active_todos 是否为空）
+    if not args_str:
         return (
             "❌ 请指定要删除的任务编号。\n"
-            "用法：/delete 1  或  /delete 1 2 3\n"
+            "用法示例：\n"
+            "  /delete 1 2 3      · 删除第 1、2、3 项\n"
+            "  /delete [1-3,5]    · 删除第 1~3 和第 5 项\n"
+            "  /delete [:4]       · 删除前 4 项\n"
+            "  /delete [:]        · 删除全部任务\n"
             "发送 /tasks 查看任务编号。"
         )
 
-    # 验证所有参数为正整数
-    invalid_parts = [p for p in parts if not p.isdigit() or int(p) < 1]
-    if invalid_parts:
-        return (
-            f"❌ 无效参数：{' '.join(invalid_parts)}\n"
-            "编号必须为正整数，多个编号用空格隔开。"
-        )
-
-    indices = sorted(set(int(p) for p in parts))
-
-    # 获取当前进行中任务（顺序与显示保持一致）
-    active_todos = await storage.get_todos(group_id, status="进行中")
     if not active_todos:
         return "📭 当前没有进行中的任务。"
 
-    # 检查编号是否越界
-    out_of_range = [i for i in indices if i > len(active_todos)]
-    if out_of_range:
-        return (
-            f"❌ 编号 {' '.join(str(i) for i in out_of_range)} 超出范围。\n"
-            f"当前共有 {len(active_todos)} 项进行中的任务，"
-            "发送 /tasks 查看任务列表。"
-        )
+    result = _parse_delete_indices(args_str, len(active_todos))
+    if isinstance(result, str):
+        return result  # 错误提示
 
-    # 执行删除
+    indices: list[int] = result
+
     deleted: list[str] = []
     failed: list[str] = []
     for i in indices:
@@ -283,7 +447,9 @@ async def handle_delete(state: dict, feishu: Any, storage: Any) -> str:
             await storage.delete_todo(record_id)
             deleted.append(f"{i}. {desc}")
         except Exception as exc:
-            logger.error("handle_delete: failed to delete record %s: %s", record_id, exc)
+            logger.error(
+                "handle_delete: failed to delete record %s: %s", record_id, exc
+            )
             failed.append(f"{i}. {desc}（失败：{exc}）")
 
     lines: list[str] = []
@@ -301,12 +467,13 @@ async def handle_delete(state: dict, feishu: Any, storage: Any) -> str:
 
 
 COMMAND_REGISTRY: dict[str, dict] = {
-    "/help":   {"description": "显示所有可用指令",               "handler": handle_help},
-    "/init":   {"description": "重载成员 + 检查/修复表格结构",     "handler": handle_init},
-    "/tasks":  {"description": "查看当前全部任务状态报告（含编号）", "handler": handle_tasks},
-    "/my":     {"description": "查看我的待完成任务",              "handler": handle_my},
-    "/update": {"description": "分析近 24h 消息，更新任务表",      "handler": handle_update},
-    "/delete": {"description": "按编号删除任务，如 /delete 1 2 3", "handler": handle_delete},
+    "/help":      {"description": "显示所有可用指令",               "handler": handle_help},
+    "/about_you": {"description": "发送机器人自我介绍",              "handler": handle_about_you},
+    "/init":      {"description": "重载成员 + 检查/修复表格结构",     "handler": handle_init},
+    "/tasks":     {"description": "查看当前全部任务状态报告（含编号）", "handler": handle_tasks},
+    "/my":        {"description": "查看我的待完成任务",              "handler": handle_my},
+    "/update":    {"description": "分析近 24h 消息，更新任务表",      "handler": handle_update},
+    "/delete":    {"description": "删除任务：/delete 1 2  /delete [1-3,5]  /delete [:]", "handler": handle_delete},
 }
 
 
@@ -332,7 +499,7 @@ async def run_command(
     """
     entry = COMMAND_REGISTRY.get(cmd)
     if entry is None:
-        return _help_text(prefix=f"❓ 未知指令 `{cmd}`")
+        return _build_help_card(prefix=f"❓ 未知指令 `{cmd}`")
 
     try:
         result = await entry["handler"](state, feishu, storage)

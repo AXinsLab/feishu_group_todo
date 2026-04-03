@@ -29,6 +29,8 @@ class SchedulerState(TypedDict):
     update_operations: list[dict]
     # 使用 operator.add 作为 reducer，跨节点累积错误列表
     errors: Annotated[list[dict], operator.add]
+    # 机器人自身 open_id，用于 filter_messages 中过滤 bot 自身消息
+    bot_open_id: str
 
 
 class MessageState(TypedDict):
@@ -56,6 +58,10 @@ class MessageState(TypedDict):
     bot_open_id: str
     # 检测到的系统 "/" 指令（如 "/init"），None 表示普通消息
     system_command: str | None
+    # 多操作支持：classify_intent 解析后的待执行操作列表
+    pending_operations: list[dict]
+    # 多操作支持：execute_operation 执行后的结果列表
+    update_results: list[dict]
 
 
 class OnboardState(TypedDict):

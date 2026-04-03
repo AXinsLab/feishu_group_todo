@@ -69,7 +69,16 @@ def build_message_graph(
         return await build_reject_reply(state)
 
     async def _resolve_operation(state: MessageState) -> dict:
-        """根据 intent 最终确定 target_todo。"""
+        """根据 intent 最终确定 target_todo。
+
+        多操作模式：classify_intent 已完成全部解析，直接跳过。
+        单操作兜底：若 pending_operations 为空，补全 target_todo。
+        """
+        # 多操作路径：pending_operations 已由 classify_intent 构建，无需再解析
+        if state.get("pending_operations"):
+            return {}
+
+        # 单操作兜底（理论上不应走到此处，保留作安全网）
         from nodes.llm_nodes import _find_target_todo
 
         intent_result = state.get("_intent_result", {})

@@ -4,8 +4,32 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+# 中文数字到阿拉伯数字的映射（支持"第三点"、"第四个"等）
+_CHINESE_NUM: dict[str, int] = {
+    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+
+
+def _find_todo_by_number(desc: str, active_todos: list[dict]) -> dict | None:
+    """检测描述是否为'第N点/项/个/条'格式，返回对应的激活任务。
+
+    支持阿拉伯数字（"第3点"）和中文数字（"第三点"、"第四个"）。
+    """
+    if not desc or not active_todos:
+        return None
+    m = re.search(r"第([0-9一二三四五六七八九十]+)[点项个条]?", desc)
+    if not m:
+        return None
+    raw = m.group(1)
+    n = int(raw) if raw.isdigit() else _CHINESE_NUM.get(raw, 0)
+    if 1 <= n <= len(active_todos):
+        return active_todos[n - 1]
+    return None
 
 
 async def analyze_messages(state: dict) -> dict:
@@ -111,31 +135,74 @@ async def classify_intent(state: dict) -> dict:
         for t in all_todos
     ]
 
+    # 构建带编号的激活任务列表（供 LLM 解析"第N点"引用）
+    active_todos = [t for t in all_todos if t.get("状态") == "进行中"]
+    numbered_active = "\n".join(
+        f"{i + 1}. {t.get('任务描述', '')}"
+        for i, t in enumerate(active_todos)
+    ) or "（当前无进行中任务）"
+
     try:
         result: IntentResult = await chain.ainvoke(
             {
                 "message_text": message_text,
-                "all_todos": json.dumps(
-                    todos_summary,
-                    ensure_ascii=False,
-                    indent=2,
-                ),
+                "all_todos": json.dumps(todos_summary, ensure_ascii=False, indent=2),
                 "member_list": member_list_str,
+                "numbered_active_todos": numbered_active,
             }
         )
 
-        target_todo = _find_target_todo(result.task_description, all_todos)
+        # ── 构建 pending_operations 列表 ──────────────────────
+        ops_raw = result.operations or []
+
+        # LLM 未填 operations 时，从顶层字段构造单元素列表（后向兼容）
+        if not ops_raw:
+            from prompts.intent import OperationItem
+            ops_raw = [
+                OperationItem(
+                    operation_type=result.operation_type,
+                    task_description=result.task_description,
+                    assignee_name=result.assignee_name,
+                    new_content=result.new_content,
+                )
+            ]
+
+        pending_operations: list[dict] = []
+        for op in ops_raw:
+            target = None
+            if op.task_description:
+                # 优先：编号解析（第N点/项）
+                target = _find_todo_by_number(op.task_description, active_todos)
+                # 其次：子串语义匹配
+                if not target:
+                    target = _find_target_todo(op.task_description, all_todos)
+            pending_operations.append({
+                "operation_type": op.operation_type,
+                "target_todo": target,
+                "note": op.note,
+                "assignee_name": op.assignee_name,
+                "new_content": op.new_content,
+                "_intent_desc": op.task_description or "",
+            })
+
+        # 路由用：取第一个非无关操作类型；全无关则"无关"
+        primary_op = next(
+            (p["operation_type"] for p in pending_operations if p["operation_type"] != "无关"),
+            "无关",
+        )
 
         logger.info(
-            "classify_intent: %s, task='%s'",
-            result.operation_type,
-            result.task_description,
+            "classify_intent: primary=%s, ops=%d %s",
+            primary_op,
+            len(pending_operations),
+            [(p["operation_type"], p.get("_intent_desc", "")[:20]) for p in pending_operations],
         )
+
         return {
-            "intent": result.operation_type,
-            "operation_type": result.operation_type,
-            "target_todo": target_todo,
-            # 存储完整 intent 结果供后续节点使用
+            "intent": primary_op,
+            "operation_type": primary_op,
+            "target_todo": pending_operations[0].get("target_todo") if pending_operations else None,
+            "pending_operations": pending_operations,
             "_intent_result": result.model_dump(),
         }
     except Exception as exc:
@@ -144,6 +211,7 @@ async def classify_intent(state: dict) -> dict:
             "intent": "无关",
             "operation_type": "无关",
             "target_todo": None,
+            "pending_operations": [],
             "_intent_result": {},
         }
 

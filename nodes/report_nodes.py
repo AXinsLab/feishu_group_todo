@@ -39,14 +39,14 @@ async def generate_report(state: dict) -> dict:
 
     low_confidence_ids: set[str] = set(analysis.get("low_confidence_done", []))
 
-    card = _build_report_card(
+    card_dict = _build_report_card(
         report_date=report_date,
         completed=completed,
         active=active,
         low_confidence_ids=low_confidence_ids,
         today=today,
     )
-    return {"reply_text": json.dumps(card, ensure_ascii=False)}
+    return {"reply_text": _card_json(card_dict)}
 
 
 async def build_reject_reply(state: dict) -> dict:
@@ -82,6 +82,31 @@ async def build_confirm_reply(state: dict) -> dict:
     )
 
     operation_type: str = state.get("operation_type", "")
+
+    # 多操作模式：有多个结果时汇总回复
+    all_results: list[dict] = state.get("update_results") or []
+    if len(all_results) > 1:
+        lines: list[str] = []
+        for r in all_results:
+            desc = r.get("task_description", "")
+            if r.get("success"):
+                action = r.get("action", "")
+                if action == "mark_done":
+                    lines.append(f"✅ 已完成：{desc}")
+                elif action == "create":
+                    lines.append(f"✅ 已新增：{desc}")
+                elif action == "update":
+                    lines.append(f"✅ 已更新：{desc}")
+                elif action == "delete":
+                    lines.append(f"✅ 已删除：{desc}")
+                elif action == "restore":
+                    lines.append(f"✅ 已恢复：{desc}")
+                else:
+                    lines.append(f"✅ {desc}")
+            else:
+                lines.append(f"❌ {r.get('error', '操作失败')}")
+        return {"reply_text": "\n".join(lines)}
+
     result: dict = state.get("update_result") or {}
 
     if not result.get("success"):
@@ -130,23 +155,73 @@ async def build_confirm_reply(state: dict) -> dict:
 # ── 消息卡片构建辅助函数 ──────────────────────────────────
 
 
-def _format_assignee(name: str, open_id: str | None = None) -> str:
-    """根据是否有 open_id 生成飞书 @mention 或纯文本格式。
+def _card_json(card: dict) -> str:
+    """将 Interactive Card dict 序列化为 send_reply/send_report 可识别的 JSON 字符串。
 
-    飞书文本消息支持 <at user_id="open_id">name</at> 语法渲染为真实 @mention。
-    无 open_id 时退化为 @name 纯文本。
-
-    Args:
-        name: 负责人姓名。
-        open_id: 负责人飞书 open_id（可选）。
-
-    Returns:
-        格式化后的负责人字符串。
+    返回格式：{"msg_type": "interactive", "content": "<card json string>"}
+    send_reply 和 send_report 均通过检测 msg_type 键自动路由到 interactive 模式。
     """
+    return json.dumps(
+        {
+            "msg_type": "interactive",
+            "content": json.dumps(card, ensure_ascii=False),
+        },
+        ensure_ascii=False,
+    )
+
+
+def _build_intro_card() -> dict:
+    """构建机器人自我介绍 Interactive Card（返回原始 card dict）。
+
+    供 send_introduction 和 handle_about_you 共用。
+    """
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "👋 群任务追踪助手"},
+            "template": "blue",
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        "· 每天 **09:30** 自动分析群消息，提取并跟踪任务\n"
+                        "· @我 用自然语言**新增、完成、修改、查询**任务"
+                    ),
+                },
+            },
+            {"tag": "hr"},
+            {
+                "tag": "note",
+                "elements": [
+                    {"tag": "plain_text", "content": "发送 /help 查看所有可用指令"}
+                ],
+            },
+        ],
+    }
+
+
+def _format_assignee(name: str, open_id: str | None = None) -> str:
+    """用于 msg_type="text" 消息的负责人格式（<at user_id="..."> 语法）。"""
     if not name:
         return ""
     if open_id:
         return f'<at user_id="{open_id}">{name}</at>'
+    return f"@{name}"
+
+
+def _format_assignee_md(name: str, open_id: str | None = None) -> str:
+    """用于 Interactive Card lark_md 内容的负责人格式。
+
+    飞书卡片 lark_md @mention 语法（官方文档）：<at id=open_id></at>
+    属性值不加引号，与文本消息的 <at user_id="..."> 写法不同。
+    """
+    if not name:
+        return ""
+    if open_id:
+        return f"<at id={open_id}></at>"
     return f"@{name}"
 
 
@@ -157,7 +232,7 @@ def _build_report_card(
     low_confidence_ids: set[str],
     today: date,
 ) -> dict:
-    """构建飞书消息卡片 JSON（富文本格式）。
+    """构建飞书 Interactive Card 格式的任务报告（返回原始 card dict）。
 
     Args:
         report_date: 报告对应日期（昨日）。
@@ -167,11 +242,10 @@ def _build_report_card(
         today: 今天的日期（用于逾期判断）。
 
     Returns:
-        符合飞书消息卡片规范的字典。
+        飞书 Interactive Card 原始字典（供 _card_json 包装后发送）。
     """
     date_str = report_date.strftime("%Y/%m/%d")
 
-    # 分离低置信度任务（进展待确认）
     low_conf_todos = [
         t for t in active if t.get("record_id") in low_confidence_ids
     ]
@@ -179,46 +253,76 @@ def _build_report_card(
         t for t in active if t.get("record_id") not in low_confidence_ids
     ]
 
-    lines: list[str] = [
-        f"📋 每日任务追踪报告 · {date_str}",
-        "─────────────────────────────────",
-    ]
+    elements: list[dict] = []
 
-    # 昨日完成
-    lines.append(f"✅ 昨日完成（{len(completed)} 项）")
+    # ── 昨日完成（始终显示，含 0 项） ────────────────────────
+    comp_lines = [f"**✅ 昨日完成（{len(completed)} 项）**"]
     for todo in completed:
+        desc = todo.get("任务描述", "")
         assignee = todo.get("负责人姓名", "")
         assignee_open_id = todo.get("负责人open_id", "")
-        desc = todo.get("任务描述", "")
-        assignee_str = f" · {_format_assignee(assignee, assignee_open_id)}" if assignee else ""
-        lines.append(f"~~· {desc}{assignee_str}~~")
+        assignee_str = f"  {_format_assignee_md(assignee, assignee_open_id)}" if assignee else ""
+        comp_lines.append(f"~~· {desc}{assignee_str}~~")
+    elements.append(
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(comp_lines)}}
+    )
+    elements.append({"tag": "hr"})
 
-    lines.append("")
-
-    # 待完成（带编号，编号基于全局 active 索引，供 /delete 使用）
-    lines.append(f"📌 待完成（{len(normal_active)} 项）")
+    # ── 待完成（带全局编号，与 /delete 编号一致） ────────────
+    active_lines = [f"**📌 待完成（{len(normal_active)} 项）**"]
     for idx, todo in enumerate(active, start=1):
-        if todo in normal_active:
-            desc = todo.get("任务描述", "")
-            assignee = todo.get("负责人姓名", "")
-            assignee_open_id = todo.get("负责人open_id", "")
-            assignee_str = f" · {_format_assignee(assignee, assignee_open_id)}" if assignee else ""
-            lines.append(f"{idx}. {desc}{assignee_str}")
+        if todo not in normal_active:
+            continue
+        desc = todo.get("任务描述", "")
+        assignee = todo.get("负责人姓名", "")
+        assignee_open_id = todo.get("负责人open_id", "")
+        due = todo.get("预期完成时间", "")
+        overdue_str = ""
+        if due:
+            try:
+                due_date = date.fromisoformat(str(due))
+                if due_date < today:
+                    overdue_str = " ⚠️逾期"
+            except (ValueError, TypeError):
+                pass
+        assignee_str = f"  {_format_assignee_md(assignee, assignee_open_id)}" if assignee else ""
+        active_lines.append(f"{idx}. {desc}{assignee_str}{overdue_str}")
+    elements.append(
+        {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(active_lines)}}
+    )
 
-    # 进展待确认
+    # ── 进展待确认 ────────────────────────────────────────────
     if low_conf_todos:
-        lines.append("")
-        lines.append(f"⚠️ 进展待确认（{len(low_conf_todos)} 项）")
+        elements.append({"tag": "hr"})
+        low_lines = [f"**⚠️ 进展待确认（{len(low_conf_todos)} 项）**"]
         for todo in low_conf_todos:
             desc = todo.get("任务描述", "")
-            lines.append(f"· {desc} · 昨日消息提及但状态不明，请相关成员确认")
+            low_lines.append(f"· {desc}（昨日消息提及但状态不明，请确认）")
+        elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(low_lines)}}
+        )
 
-    lines.append("─────────────────────────────────")
-    lines.append("如需更新任务，请 @我 并说明操作")
+    elements.append({"tag": "hr"})
+    elements.append(
+        {
+            "tag": "note",
+            "elements": [
+                {
+                    "tag": "plain_text",
+                    "content": "如需更新任务，@我 并说明操作  ·  /tasks 查看实时状态",
+                }
+            ],
+        }
+    )
 
-    # 使用飞书富文本（post）格式
-    full_text = "\n".join(lines)
     return {
-        "msg_type": "text",
-        "content": json.dumps({"text": full_text}, ensure_ascii=False),
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": f"📋 每日任务追踪报告 · {date_str}",
+            },
+            "template": "blue",
+        },
+        "elements": elements,
     }

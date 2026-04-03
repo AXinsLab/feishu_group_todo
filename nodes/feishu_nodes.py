@@ -207,6 +207,7 @@ async def send_report(
             group_id,
             exc,
         )
+        raise  # 重新抛出，使错误传播至 _handle_errors → ops_chat_id
     return {}
 
 
@@ -298,6 +299,8 @@ async def parse_event(state: dict) -> dict:
         "member_refresh_attempted": False,
         "target_todo": None,
         "update_result": None,
+        "update_results": [],
+        "pending_operations": [],
         "reply_text": "",
     }
 
@@ -319,12 +322,24 @@ async def send_reply(
     message_id: str = state.get("message_id", "")
     reply_text: str = state.get("reply_text", "")
 
-    content = json.dumps({"text": reply_text}, ensure_ascii=False)
+    # 自动检测是否为 Interactive Card（reply_text 为含 msg_type 键的 JSON 字符串）
+    import json as _json
+    try:
+        parsed = _json.loads(reply_text)
+        if isinstance(parsed, dict) and "msg_type" in parsed:
+            msg_type = parsed["msg_type"]
+            content = parsed["content"]
+        else:
+            raise ValueError
+    except (ValueError, TypeError, _json.JSONDecodeError):
+        msg_type = "text"
+        content = _json.dumps({"text": reply_text}, ensure_ascii=False)
+
     try:
         await feishu.send_message(
             group_id,
             content,
-            msg_type="text",
+            msg_type=msg_type,
             reply_to_message_id=message_id,
         )
     except Exception as exc:
@@ -372,12 +387,13 @@ async def send_introduction(
     Returns:
         空字典（无状态更新）。
     """
-    from prompts.report import INTRODUCTION_TEXT
+    from nodes.report_nodes import _build_intro_card
 
     group_id: str = state.get("group_id", "")
-    content = json.dumps({"text": INTRODUCTION_TEXT}, ensure_ascii=False)
+    card = _build_intro_card()
+    content = json.dumps(card, ensure_ascii=False)
     try:
-        await feishu.send_message(group_id, content)
+        await feishu.send_message(group_id, content, msg_type="interactive")
         logger.info("Introduction sent to group %s", group_id)
     except Exception as exc:
         logger.error(

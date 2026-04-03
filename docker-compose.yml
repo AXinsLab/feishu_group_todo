@@ -4,13 +4,11 @@ services:
     container_name: feishu-todo-agent
     restart: always
     env_file: .env
-    ports:
-      - "8000:8000"
     volumes:
       - ./data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
+      interval: 10m
       timeout: 10s
       retries: 3
       start_period: 10s

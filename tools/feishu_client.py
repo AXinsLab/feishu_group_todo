@@ -250,6 +250,9 @@ class FeishuClient:
                             "sender_open_id": item.get("sender", {}).get(
                                 "id", ""
                             ),
+                            "sender_type": item.get("sender", {}).get(
+                                "sender_type", "user"
+                            ),
                             "text": text,
                             "create_time": item.get("create_time", ""),
                         }

@@ -260,6 +260,7 @@ async def _run_scheduler_graph(state: Any, trigger_time: Any) -> None:
         "llm_analysis": {},
         "update_operations": [],
         "errors": [],
+        "bot_open_id": getattr(state, "bot_open_id", ""),
     }
 
     thread_id = f"scheduler_{trigger_time.date()}"

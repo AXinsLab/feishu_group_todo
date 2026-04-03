@@ -124,23 +124,37 @@ async def filter_messages(state: dict) -> dict:
     """
     raw_messages: list[dict] = state.get("raw_messages", [])
     active_todos: list[dict] = state.get("active_todos", [])
+    bot_open_id: str = state.get("bot_open_id", "")
 
     # 收集所有已存在的来源消息 ID
     existing_source_ids: set[str] = {
         t.get("来源消息ID", "") for t in active_todos if t.get("来源消息ID")
     }
 
+    # Debug: log sender info for each raw message to verify filter
+    for m in raw_messages:
+        logger.debug(
+            "Raw message: id=%s sender_open_id=%s sender_type=%s text_preview=%s",
+            m.get("message_id", "")[:12],
+            m.get("sender_open_id", "")[:16],
+            m.get("sender_type", "MISSING"),
+            m.get("text", "")[:50].replace("\n", " "),
+        )
+
     filtered = [
         m
         for m in raw_messages
         if m.get("message_id") not in existing_source_ids
+        and m.get("sender_type", "user") != "app"
+        and (not bot_open_id or m.get("sender_open_id") != bot_open_id)
     ]
 
     logger.info(
-        "Filtered messages: %d -> %d (removed %d)",
+        "filter_messages: %d raw -> %d filtered (removed %d); bot_open_id=%s",
         len(raw_messages),
         len(filtered),
         len(raw_messages) - len(filtered),
+        bot_open_id[:16] if bot_open_id else "EMPTY",
     )
     return {"filtered_messages": filtered}
 
@@ -185,11 +199,25 @@ async def build_operations(state: dict) -> dict:
         )
 
     # 新增任务
+    member_map: dict = state.get("member_map", {})
     for task in analysis.get("new_tasks", []):
+        assignee_name: str = task.get("assignee_name") or ""
+        assignee_open_id: str = task.get("assignee_open_id") or ""
+
+        # LLM 返回 name 但未返回 open_id 时，从 member_map 做 server-side 模糊解析
+        if assignee_name and not assignee_open_id:
+            assignee_open_id = _resolve_assignee_open_id(
+                {"assignee_name": assignee_name}, member_map
+            )
+        # LLM 返回 open_id 但未返回 name 时，从 member_map 补全 name
+        if assignee_open_id and not assignee_name:
+            member_info = member_map.get(assignee_open_id, {})
+            assignee_name = member_info.get("name", "") or member_info.get("真实姓名", "")
+
         task_fields: dict = {
             "任务描述": task.get("description", ""),
-            "负责人姓名": task.get("assignee_name") or "",
-            "负责人open_id": task.get("assignee_open_id") or "",
+            "负责人姓名": assignee_name,
+            "负责人open_id": assignee_open_id,
             "状态": "进行中",
             "来源类型": "定时提取",
             "来源消息ID": task.get("source_message_id", ""),
@@ -242,49 +270,48 @@ async def execute_updates(
     return result
 
 
-async def execute_operation(
+async def _execute_single_op(
+    op: dict,
     state: dict,
     storage: Any,
 ) -> dict:
-    """执行 MessageGraph 的单条 CRUD 操作。
+    """执行单个操作，返回该操作的结果 dict。
 
-    Args:
-        state: 包含 operation_type、target_todo 的 MessageState。
-        storage: StorageInterface 实例。
-
-    Returns:
-        包含 update_result 的部分状态更新。
+    op 包含：operation_type, target_todo, note, assignee_name, new_content, _intent_desc
     """
-    operation_type: str = state.get("operation_type", "")
-    target_todo: dict | None = state.get("target_todo")
+    operation_type: str = op.get("operation_type", "")
+    target_todo: dict | None = op.get("target_todo")
+    note: str | None = op.get("note")
     group_id: str = state.get("group_id", "")
     message_id: str = state.get("message_id", "")
+    member_map: dict = state.get("member_map", {})
     today_ms = _date_to_ms(date.today())
 
     try:
         if operation_type == "新增":
-            intent = state.get("_intent_result", {})
-            member_map = state.get("member_map", {})
-            assignee_name = _resolve_assignee_name(intent, member_map)
-            assignee_open_id = _resolve_assignee_open_id(intent, member_map)
-            # fallback 1：LLM 未提取到负责人时，直接使用消息中 @提及 的第一个非 bot 用户
+            # 新增时负责人信息从 op 字段优先，其次 mentioned_users，最后 sender
+            assignee_name: str = op.get("assignee_name") or ""
+            assignee_open_id: str = ""
+            if assignee_name:
+                assignee_open_id = _resolve_assignee_open_id(
+                    {"assignee_name": assignee_name}, member_map
+                )
             if not assignee_name:
                 for _u in state.get("mentioned_users", []):
                     assignee_name = _u.get("name", "")
                     assignee_open_id = _u.get("open_id", "")
                     break
-            # fallback 2：仍无负责人则默认为消息发送者
             if not assignee_name:
                 sender_open_id = state.get("sender_open_id", "")
                 if sender_open_id:
                     sender_info = member_map.get(sender_open_id, {})
                     assignee_name = (
-                        sender_info.get("真实姓名")
-                        or sender_info.get("name", "")
+                        sender_info.get("真实姓名") or sender_info.get("name", "")
                     )
                     assignee_open_id = sender_open_id
+            task_desc = op.get("new_content") or op.get("_intent_desc", "")
             fields = {
-                "任务描述": intent.get("task_description", ""),
+                "任务描述": task_desc,
                 "负责人姓名": assignee_name,
                 "负责人open_id": assignee_open_id,
                 "状态": "进行中",
@@ -294,26 +321,26 @@ async def execute_operation(
                 "最后更新": today_ms,
                 "群ID": group_id,
             }
-            # due_date 字段已移除，不再写入预期完成时间
             record_id = await storage.create_todo(fields)
             return {
-                "update_result": {
-                    "success": True,
-                    "record_id": record_id,
-                    "fields": fields,
-                }
+                "success": True,
+                "action": "create",
+                "task_description": task_desc,
+                "record_id": record_id,
+                "fields": fields,
             }
 
         if target_todo is None:
+            desc_hint = op.get("_intent_desc", "")
+            hint = f"「{desc_hint}」" if desc_hint else ""
             return {
-                "update_result": {
-                    "success": False,
-                    "error": "未找到目标任务",
-                }
+                "success": False,
+                "task_description": desc_hint,
+                "error": f"未找到任务{hint}，请发送 /tasks 查看任务编号后重试",
             }
 
-        record_id = target_todo.get("record_id", "")
-        desc = target_todo.get("任务描述", "")
+        record_id: str = target_todo.get("record_id", "")
+        desc: str = target_todo.get("任务描述", "")
 
         if operation_type == "标记完成":
             fields = {
@@ -322,83 +349,124 @@ async def execute_operation(
                 "完成来源": "成员确认",
                 "最后更新": today_ms,
             }
+            if note:
+                fields["进展备注"] = note
             await storage.update_todo(record_id, fields)
             return {
-                "update_result": {
-                    "success": True,
-                    "action": "mark_done",
-                    "task_description": desc,
-                }
+                "success": True,
+                "action": "mark_done",
+                "task_description": desc,
             }
 
         if operation_type == "修改":
-            intent = state.get("_intent_result", {})
             update_fields: dict = {"最后更新": today_ms}
-            if intent.get("new_content"):
-                update_fields["任务描述"] = intent["new_content"]
-            if intent.get("assignee_name"):
-                update_fields["负责人姓名"] = intent["assignee_name"]
+            new_content = op.get("new_content")
+            if new_content:
+                update_fields["任务描述"] = new_content
+            op_assignee = op.get("assignee_name")
+            if op_assignee:
+                update_fields["负责人姓名"] = op_assignee
                 update_fields["负责人open_id"] = _resolve_assignee_open_id(
-                    intent,
-                    state.get("member_map", {}),
+                    {"assignee_name": op_assignee}, member_map
                 )
-            # due_date 字段已移除
+            if note:
+                update_fields["进展备注"] = note
             await storage.update_todo(record_id, update_fields)
             return {
-                "update_result": {
-                    "success": True,
-                    "action": "update",
-                    "task_description": desc,
-                    "changes": update_fields,
-                }
+                "success": True,
+                "action": "update",
+                "task_description": desc,
+                "changes": update_fields,
             }
 
         if operation_type == "删除":
             await storage.delete_todo(record_id)
             return {
-                "update_result": {
-                    "success": True,
-                    "action": "delete",
-                    "task_description": desc,
-                }
+                "success": True,
+                "action": "delete",
+                "task_description": desc,
             }
 
         if operation_type == "恢复任务":
             fields = {
                 "状态": "进行中",
-                # 注意：不清空完成日期，避免向日期字段传入空值导致 DatetimeFieldConvFail
                 "最后更新": today_ms,
             }
             await storage.update_todo(record_id, fields)
             return {
-                "update_result": {
-                    "success": True,
-                    "action": "restore",
-                    "task_description": desc,
-                }
+                "success": True,
+                "action": "restore",
+                "task_description": desc,
             }
 
         if operation_type == "查询状态":
             return {
-                "update_result": {
-                    "success": True,
-                    "action": "query",
-                    "task_description": desc,
-                    "status": target_todo.get("状态", ""),
-                    "assignee": target_todo.get("负责人姓名", ""),
-                }
+                "success": True,
+                "action": "query",
+                "task_description": desc,
+                "status": target_todo.get("状态", ""),
+                "assignee": target_todo.get("负责人姓名", ""),
+                "assignee_open_id": target_todo.get("负责人open_id", ""),
             }
 
     except Exception as exc:
-        logger.error("execute_operation failed: %s", exc)
+        logger.error("_execute_single_op failed (%s): %s", operation_type, exc)
         return {
-            "update_result": {
-                "success": False,
-                "error": str(exc),
-            }
+            "success": False,
+            "task_description": target_todo.get("任务描述", "") if target_todo else "",
+            "error": str(exc),
         }
 
-    return {"update_result": {"success": False}}
+    return {"success": False, "task_description": ""}
+
+
+async def execute_operation(
+    state: dict,
+    storage: Any,
+) -> dict:
+    """执行 MessageGraph 的 CRUD 操作（支持单操作和多操作）。
+
+    从 state.pending_operations 读取操作列表，逐一执行。
+    若无 pending_operations，则后向兼容地从 operation_type/target_todo 构建单元素列表。
+
+    Args:
+        state: MessageState。
+        storage: StorageInterface 实例。
+
+    Returns:
+        包含 update_result（最后一个操作结果）和 update_results（全部结果）的部分状态更新。
+    """
+    pending_ops: list[dict] = state.get("pending_operations") or []
+
+    # 后向兼容：若无 pending_operations，从原字段构造单元素列表
+    if not pending_ops:
+        pending_ops = [
+            {
+                "operation_type": state.get("operation_type", ""),
+                "target_todo": state.get("target_todo"),
+                "note": None,
+                "assignee_name": state.get("_intent_result", {}).get("assignee_name"),
+                "new_content": state.get("_intent_result", {}).get("new_content"),
+                "_intent_desc": state.get("_intent_result", {}).get("task_description", ""),
+            }
+        ]
+
+    results: list[dict] = []
+    for op in pending_ops:
+        r = await _execute_single_op(op, state, storage)
+        results.append(r)
+        logger.info(
+            "execute_operation: %s '%s' -> success=%s",
+            op.get("operation_type"),
+            op.get("_intent_desc", "")[:30],
+            r.get("success"),
+        )
+
+    last_result = results[-1] if results else {"success": False}
+    return {
+        "update_results": results,
+        "update_result": last_result,
+    }
 
 
 # ── OnboardGraph 节点 ─────────────────────────────────────
