@@ -17,6 +17,9 @@
 ## ✨ Features
 
 - 🗣️ **Natural Language Interaction** — Mention the bot to create, update, delete, query, or restore tasks using plain language (Chinese or English)
+- 📝 **Multi-Task in One Message** — Handle multiple tasks in a single reply: "第3点不能共用，第四点有手板" marks both tasks complete with progress notes recorded
+- 🔢 **Number & Semantic Reference** — Reference tasks by index ("第3点"、"第三个") or by implicit description ("刚才那个MIC评估") — the bot resolves both
+- 📌 **Progress Notes** — When marking tasks complete, any result or explanation is automatically saved to the 进展备注 field in Bitable
 - ⏰ **Scheduled Daily Analysis** — Every morning at 09:30, automatically analyzes the past 24 hours of messages, extracts new tasks, and marks completed ones
 - 📊 **Numbered Task Reports** — Daily reports with indexed tasks (1. 2. 3. …), completed items, and per-user @mention for assignees
 - 👥 **Auto Member Sync** — Group member list is refreshed every day at 09:30 and on every `/init` or `/update` call
@@ -40,8 +43,12 @@
 | `删掉登录Bug这个任务` | 🗑️ Delete task |
 | `登录Bug现在什么状态` | 🔍 Query task status |
 | `把登录Bug重新激活` | 🔄 Restore to in-progress |
+| `第3点不能共用，会新增模具费` | ✅ Mark task #3 complete + save note |
+| `第四点有个实心手板，第2个完成了` | ✅ Mark tasks #4 and #2 complete in one message |
 
 > When no assignee is specified, the **message sender** is automatically set as the assignee.
+>
+> You can reference tasks by their **numbered index** (第3点, 第四个) or by **natural language description** — the bot resolves both automatically.
 
 ### Slash Commands (@ the bot)
 
